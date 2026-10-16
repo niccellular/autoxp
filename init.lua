@@ -29,7 +29,7 @@ local S = {
     selfHealPct = 50, groupHealPct = 40, emergencyPct = 20, healSpells = '',
     nukes = '', nukeManaMin = 30, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
     combatBuffs = 'Yaulp', stunCooldown = true, keepInFront = true,
-    avoidMobs = true, avoidRadius = 40, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '',
+    avoidMobs = true, avoidRadius = 40, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
     style = 'Auto', castRange = 100, mez = '', dots = '', debuffs = '', petSpell = '', usePet = true, class = '',
     abilities = {},   -- { {name=, kind='skill'|'aa'|'disc', role=} }
 }
@@ -60,7 +60,7 @@ local R = {
     travelTarget = '', travelTries = 0, lastMoveAt = 0, lastPos = nil, mezzed = {}, petTarget = 0,
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
-    ourTarget = 0, pickId = 0,
+    ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0,
 }
 local logf = io.open(mq.luaDir .. '/autoxp_log.txt', 'a')
 local function log(fmt, ...)
@@ -368,8 +368,37 @@ local function gemSig()
     return table.concat(g, '|')
 end
 
+-- self buffs from the spell book: HP, stat, resist, haste and proc buffs of 10+ minutes, best of each line
+local BUFFCAT = { ['HP Buffs'] = true, ['Statistic Buffs'] = true }
+local BUFFSUB = { Haste = true, ['Combat Innates'] = true }
+local BUFFTT = { Self = true, Single = true, ['Group v1'] = true, ['Group v2'] = true }
+local function refreshBuffs()
+    local lvl = mq.TLO.Me.Level() or 0
+    R.buffLevel = lvl
+    local best = {}
+    for i = 1, 1120 do
+        local b = mq.TLO.Me.Book(i)
+        if b() and b.SpellType() == 'Beneficial' and (b.Level() or 0) <= lvl and BUFFTT[b.TargetType() or '']
+            and (BUFFCAT[b.Category() or ''] or BUFFSUB[b.Subcategory() or '']) and (b.Duration.TotalSeconds() or 0) >= 600 then
+            -- one per line; each resist (fire, cold, poison, disease, magic) is its own line
+            local key = (b.Category() or '') .. '/' .. (b.Subcategory() or '')
+            if b.Subcategory() == 'Resist Buff' then
+                for spa = 46, 50 do if b.HasSPA(spa)() then key = key .. '/' .. spa end end
+            end
+            if not best[key] or (b.Level() or 0) > best[key].lvl then best[key] = { name = b.Name(), lvl = b.Level() or 0 } end
+        end
+    end
+    local out = {}
+    for _, b in pairs(best) do table.insert(out, b) end
+    table.sort(out, function(a, b) return a.lvl > b.lvl end)
+    local names = {}
+    for _, b in ipairs(out) do table.insert(names, b.name) end
+    local s = table.concat(names, ', ')
+    if s ~= S.buffs then S.buffs = s; log('self buffs from the book: %s', s) end
+end
+
 local function fillFromGems()
-    local heals, stuns, nukes, buffs, mez, dots, debuffs, pet = {}, {}, {}, {}, {}, {}, {}, ''
+    local heals, stuns, nukes, mez, dots, debuffs, pet = {}, {}, {}, {}, {}, {}, ''
     for g = 1, 13 do
         local sp = mq.TLO.Me.Gem(g)
         if sp() then
@@ -381,12 +410,12 @@ local function fillFromGems()
             elseif sub == 'Slow' then table.insert(debuffs, name)
             elseif not bene and cat == 'Direct Damage' then table.insert(nukes, name)
             elseif not bene and cat == 'Damage Over Time' then table.insert(dots, name)
-            elseif cat == 'Pet' and sub:find('^Sum:') then pet = name
-            elseif bene and (cat:find('Buff') or sub == 'Attack') then table.insert(buffs, name) end
+            elseif cat == 'Pet' and sub:find('^Sum:') then pet = name end
         end
     end
     byLevel(heals); byLevel(stuns); byLevel(nukes); byLevel(dots); byLevel(debuffs); byLevel(mez)
-    S.healSpells, S.stuns, S.nukes, S.buffs = table.concat(heals, ', '), table.concat(stuns, ', '), table.concat(nukes, ', '), table.concat(buffs, ', ')
+    S.healSpells, S.stuns, S.nukes = table.concat(heals, ', '), table.concat(stuns, ', '), table.concat(nukes, ', ')
+    refreshBuffs()
     S.ccStuns, S.mez, S.dots, S.debuffs, S.petSpell = S.stuns, table.concat(mez, ', '), table.concat(dots, ', '), table.concat(debuffs, ', '), pet
     log('from gems: heals=[%s] stuns=[%s] nukes=[%s] dots=[%s] mez=[%s] slows=[%s] pet=[%s] buffs=[%s]',
         S.healSpells, S.stuns, S.nukes, S.dots, S.mez, S.debuffs, S.petSpell, S.buffs)
@@ -407,7 +436,8 @@ end
 local function stopAll(reason)
     attackOff(); mq.cmd('/stick off'); mq.cmd('/nav stop'); petBackOff()
     if R.state == 'TRAVEL' then mq.cmd('/travelto stop') end
-    R.running = false; R.paused = false; R.targetId, R.pickId = 0, 0
+    if R.swapGem and R.swapGem.name ~= '' then mq.cmdf('/memspell %d "%s"', R.swapGem.g, R.swapGem.name) end
+    R.running = false; R.paused = false; R.targetId, R.pickId, R.swapGem = 0, 0, nil
     setState('IDLE')
     updateMapRadius()
     save()
@@ -635,6 +665,48 @@ local function upgradeGems()
     return false
 end
 
+-- self buffs, best first: cast whatever is missing and would stack. A buff that isn't memorized
+-- borrows a gem (an empty one, else the last), which gets its spell back once everything is up
+local function restoreGem()
+    local s = R.swapGem
+    if not s then return false end
+    if s.name == '' or mq.TLO.Me.Gem(s.g).Name() == s.name then R.swapGem = nil; return false end
+    log('putting %s back in gem %d', s.name, s.g)
+    mq.cmdf('/memspell %d "%s"', s.g, s.name)
+    mq.delay(20000, function() return mq.TLO.Me.Gem(s.g).Name() == s.name or #hostiles() > 0 end)
+    if mq.TLO.Me.Gem(s.g).Name() == s.name then R.swapGem = nil end
+    return true
+end
+
+local function doBuffs()
+    if (mq.TLO.Me.Level() or 0) ~= R.buffLevel then refreshBuffs() end
+    for _, b in ipairs(list(S.buffs)) do
+        local sp = mq.TLO.Spell(b)
+        if sp() and not mq.TLO.Me.Buff(b)() and sp.Stacks() and not blocked(b) and (mq.TLO.Me.CurrentMana() or 0) >= (sp.Mana() or 0) then
+            if spellReady(b) then castOn(b, myId(), 'buff'); return true end
+            local swap = R.swapGem
+            if swap and mq.TLO.Me.Gem(swap.g).Name() == b then
+                if mq.gettime() - (swap.at or 0) < 15000 then return true end   -- gem still refreshing
+                backoff(b, 'not ready after memorizing', 120000)
+            elseif not mq.TLO.Me.Gem(b)() and S.memBuffs and mq.TLO.Me.Book(b)() then
+                if not swap then
+                    local g = mq.TLO.Me.NumGems() or 8
+                    for i = 1, g do if not mq.TLO.Me.Gem(i)() then g = i; break end end
+                    swap = { g = g, name = mq.TLO.Me.Gem(g).Name() or '' }
+                    R.swapGem = swap
+                end
+                log('memorizing %s in gem %d to buff', b, swap.g)
+                mq.cmdf('/memspell %d "%s"', swap.g, b)
+                mq.delay(20000, function() return mq.TLO.Me.Gem(swap.g).Name() == b or #hostiles() > 0 end)
+                swap.at = mq.gettime()
+                if mq.TLO.Me.Gem(swap.g).Name() ~= b then backoff(b, 'memorize', 60000) end
+                return true
+            end
+        end
+    end
+    return restoreGem()
+end
+
 local function engage(id)
     local t = spawn(id)
     if not alive(t) then return end
@@ -836,16 +908,16 @@ local function step()
 
     elseif st == 'BUFF' then
         if #hostiles() > 0 then setState('FIND'); return end
-        if upgradeGems() then return end
-        local sig = gemSig()
-        if sig ~= S.gemSig then
-            if S.gemSig ~= '' then log('memorized spells changed - refreshing spell lists') end
-            S.gemSig = sig; fillFromGems()
+        if not R.swapGem then
+            if upgradeGems() then return end
+            local sig = gemSig()
+            if sig ~= S.gemSig then
+                if S.gemSig ~= '' then log('memorized spells changed - refreshing spell lists') end
+                S.gemSig = sig; fillFromGems()
+            end
         end
         if S.usePet and S.petSpell ~= '' and (mq.TLO.Me.Pet.ID() or 0) == 0 and spellReady(S.petSpell) then castOn(S.petSpell, myId(), 'summon pet'); return end
-        for _, b in ipairs(list(S.buffs)) do
-            if not mq.TLO.Me.Buff(b)() and spellReady(b) then castOn(b, myId(), 'buff'); return end
-        end
+        if doBuffs() then return end
         setState('FIND')
 
     elseif st == 'REST' then
@@ -1226,6 +1298,8 @@ local function draw()
                 S.stunCooldown = ImGui.Checkbox('Stun on cooldown during fights (Tank)', S.stunCooldown)
                 S.combatBuffs = ImGui.InputText('Combat buffs (recast in fight)', S.combatBuffs)
                 S.buffs = ImGui.InputText('Self buffs', S.buffs)
+                tip('Filled from the spell book: HP, stat, resist, haste and proc buffs of 10+ minutes, best of each line.')
+                S.memBuffs = ImGui.Checkbox('Memorize missing buffs (borrows the last gem, then puts it back)', S.memBuffs)
                 S.useTaunt = ImGui.Checkbox('Taunt when aggro < 100% (Tank)', S.useTaunt)
                 S.prioritize = ImGui.Checkbox('Tank target priority: casters > healers > hybrids > melee', S.prioritize)
                 S.keepInFront = ImGui.Checkbox('Reposition so all mobs are in front of me (melee)', S.keepInFront)
