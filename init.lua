@@ -60,6 +60,7 @@ local R = {
     travelTarget = '', travelTries = 0, lastMoveAt = 0, lastPos = nil, mezzed = {}, petTarget = 0,
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
+    ourTarget = 0, pickId = 0,
 }
 local logf = io.open(mq.luaDir .. '/autoxp_log.txt', 'a')
 local function log(fmt, ...)
@@ -90,11 +91,28 @@ local function list(str)
 end
 
 -- targeting / attack ----------------------------------------------------------------------
+-- the player's pick: an NPC targeted by anyone but us; we fight it until it dies
+local function noticePick()
+    local id = mq.TLO.Target.ID() or 0
+    if id == 0 or id == R.ourTarget then return end
+    R.ourTarget = id
+    if mq.gettime() - R.lastAssist < 1500 then return end   -- /assist targets for us
+    local t = mq.TLO.Target
+    local cls = t.Class.ID() or 0
+    -- combat classes only: never merchants, bankers or GMs
+    if id ~= R.pickId and t.Type() == 'NPC' and cls >= 1 and cls <= 16 and alive(spawn(id)) then
+        R.pickId = id
+        log('you picked %s - fighting it', t.CleanName())
+    end
+end
 local function targetId(id, timeout)
+    noticePick()
     if (mq.TLO.Target.ID() or 0) == id then return true end
+    R.ourTarget = id
     mq.cmdf('/target id %d', id)
     mq.delay(timeout or 600, function() return (mq.TLO.Target.ID() or 0) == id end)
-    return (mq.TLO.Target.ID() or 0) == id
+    R.ourTarget = mq.TLO.Target.ID() or 0
+    return R.ourTarget == id
 end
 
 -- casters and priests fight from range; everyone else melees
@@ -389,7 +407,7 @@ end
 local function stopAll(reason)
     attackOff(); mq.cmd('/stick off'); mq.cmd('/nav stop'); petBackOff()
     if R.state == 'TRAVEL' then mq.cmd('/travelto stop') end
-    R.running = false; R.paused = false; R.targetId = 0
+    R.running = false; R.paused = false; R.targetId, R.pickId = 0, 0
     setState('IDLE')
     updateMapRadius()
     save()
@@ -436,6 +454,7 @@ end
 local function bestTarget()
     local best, bp, bm
     for _, s in ipairs(hostiles()) do
+        if s.ID() == R.pickId then return s, 0 end
         local p, m = prio(s), mezzed(s)
         if not best or (bm and not m) or (bm == m and (p < bp or (p == bp and (s.PctHPs() or 100) < (best.PctHPs() or 100)))) then
             best, bp, bm = s, p, m
@@ -543,7 +562,7 @@ end
 
 local function doTank(t)
     if S.role ~= 'Tank' or not alive(t) then return false end
-    if S.prioritize and mq.gettime() - R.lastSwitch > 3000 then
+    if S.prioritize and R.targetId ~= R.pickId and mq.gettime() - R.lastSwitch > 3000 then
         local best, bp = bestTarget()
         if best and best.ID() ~= R.targetId and bp < prio(t) then
             log('switch target -> %s (%s, prio %d)', best.CleanName(), best.Class.ShortName() or '?', bp)
@@ -638,6 +657,28 @@ local function engage(id)
     setState('APPROACH')
 end
 
+-- go after the player's pick: switch to it mid-fight, otherwise engage it (Manual waits until it's on us)
+local function followPick(st)
+    if R.pickId == 0 then return false end
+    local t = spawn(R.pickId)
+    if not alive(t) then R.pickId = 0; return false end
+    if R.targetId == R.pickId and (st == 'APPROACH' or st == 'FIGHT') then return false end
+    if st == 'FIGHT' then
+        log('switch target -> %s (your pick)', t.CleanName())
+        R.targetId, R.targetName, R.opened, R.holdUntil = t.ID(), t.CleanName(), false, 0
+        attackOn(); closeIn(t)
+        return true
+    end
+    if S.mode == 'Manual' then return false end
+    if st == 'TRAVEL' then mq.cmd('/travelto stop') end
+    if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+    local onUs = false
+    for _, x in ipairs(hostiles()) do if x.ID() == t.ID() then onUs = true end end
+    R.pendingDetour, R.pullCandidate = nil, S.mode == 'Hunter' and not onUs
+    engage(t.ID())
+    return true
+end
+
 -- route safety: MQ2Nav path waypoints vs every NPC near the route -----------------------------
 local function pathPoints(dest)
     local s = mq.TLO.Navigation.PathPoints(dest)()
@@ -718,18 +759,20 @@ local function pickTarget()
     elseif S.mode == 'Hunter' then
         if R.kills >= S.kills then stopAll(string.format('done: %d kills', R.kills)); return nil end
         local q = string.format('npc range %d %d radius %d noalert 1 targetable', S.minlvl, S.maxlvl, S.radius)
-        -- shortest safe walk among the nearest candidates: each mob near the route costs 400 units
-        local best, bestScore, bestPts, bestHits
-        for i = 1, 10 do
+        -- shortest safe walk among the 10 nearest reachable candidates: each mob near the route costs 400 units.
+        -- NearestSpawn is 2D, so the nearest can be floors away with no path; skip those and look further
+        local best, bestScore, bestPts, bestHits, found = nil, nil, nil, nil, 0
+        for i = 1, 50 do
             local s = mq.TLO.NearestSpawn(i, q)
-            if not s() then break end
+            if not s() or found >= 10 then break end
             local id = s.ID()
             if (R.skip[id] or 0) < mq.gettime() then
                 -- route checks need MQ2Nav's PathPoints member; without it, rank by path length only
                 local pts = pathPoints('id ' .. id)
                 local len = pts and pathLen(pts) or mq.TLO.Navigation.PathLength('id ' .. id)() or -1
-                if len < 0 then len = nil end
+                if len < 0 then len = nil; R.skip[id] = mq.gettime() + 30000 end   -- off the navmesh
                 if len and len < S.radius * 1.5 then
+                    found = found + 1
                     local hits = S.avoidMobs and mobsOnRoute(pts, id) or {}
                     local score = len + #hits * 400
                     if not bestScore or score < bestScore then best, bestScore, bestPts, bestHits = id, score, pts, hits end
@@ -754,13 +797,15 @@ end
 
 -- one tick of the state machine -----------------------------------------------------------
 local function step()
+    noticePick()
     if casting() then return end
     if doHeal() then return end
     local st = R.state
+    if followPick(st) then return end
     local here = mq.TLO.Zone.ShortName() or ''
 
     -- hunt zone changed while running: leave once we're not fighting
-    if S.mode == 'Hunter' and S.travel and here ~= S.zone and st ~= 'TRAVEL' and st ~= 'FIGHT' and #hostiles() == 0 then
+    if S.mode == 'Hunter' and S.travel and here ~= S.zone and st ~= 'TRAVEL' and st ~= 'FIGHT' and R.pickId == 0 and #hostiles() == 0 then
         mq.cmd('/stick off'); mq.cmd('/nav stop'); attackOff(); R.targetId = 0
         mq.cmdf('/travelto %s', S.zone)
         R.travelTarget, R.travelTries, R.lastMoveAt = S.zone, 0, mq.gettime()
@@ -867,9 +912,9 @@ local function step()
                 navTo(t.ID())
             else
                 log('no path to %s - skipping it', R.targetName)
-                R.skip[t.ID()] = mq.gettime() + 120000; R.targetId = 0; setState('FIND')
+                R.skip[t.ID()] = mq.gettime() + 120000; R.targetId, R.pickId = 0, 0; setState('FIND')
             end
-        elseif inState() > 120000 then log('approach timeout'); mq.cmd('/nav stop'); setState('FIND') end
+        elseif inState() > 120000 then log('approach timeout'); mq.cmd('/nav stop'); R.pickId = 0; setState('FIND') end
 
     elseif st == 'FIGHT' then
         local t = spawn(R.targetId)
@@ -923,7 +968,7 @@ local function step()
         if doTank(t) then return end
         if doCC(t) then return end
         if doDps(t) then return end
-        if inState() > 300000 then log('fight timeout'); attackOff(); setState('FIND') end
+        if inState() > 300000 then log('fight timeout'); attackOff(); R.pickId = 0; setState('FIND') end
     end
 end
 
@@ -1090,7 +1135,8 @@ local function draw()
         end
         local t = spawn(R.targetId)
         if alive(t) then
-            ImGui.Text(string.format('Target: %s (L%d %s %s) %.0f', R.targetName, t.Level() or 0, t.Class.ShortName() or '?', t.ConColor() or '?', t.Distance() or 0))
+            ImGui.Text(string.format('Target: %s (L%d %s %s) %.0f%s', R.targetName, t.Level() or 0, t.Class.ShortName() or '?', t.ConColor() or '?', t.Distance() or 0,
+                R.targetId == R.pickId and '  - your pick' or ''))
             bar((t.PctHPs() or 0) / 100, string.format('%d%%', t.PctHPs() or 0))
         end
         local hs = hostiles()
