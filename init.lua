@@ -78,7 +78,8 @@ local function myId() return mq.TLO.Me.ID() or 0 end
 local function totalXp() return (mq.TLO.Me.Level() or 0) * 100 + (mq.TLO.Me.PctExp() or 0) end
 local function casting() return mq.TLO.Me.Casting() ~= nil end
 local function spawn(id) return id and id > 0 and mq.TLO.Spawn('id ' .. id) or nil end
-local function alive(s) return s and s() and s.Type() ~= 'Corpse' and (s.PctHPs() or 1) > 0 end
+-- dead = corpse; a living mob can read 0% HP (a sliver left), so HP% never means dead
+local function alive(s) return s and s() and s.Type() ~= 'Corpse' end
 local function save() mq.pickle(CONFIG, S) end
 
 local function list(str)
