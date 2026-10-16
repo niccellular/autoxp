@@ -15,22 +15,28 @@ local function zoneInfo(short)
     for _, z in ipairs(ZONES) do if z.short == short then return z end end
     return nil
 end
-local CONFIG = string.format('%s/autoxp_%s.lua', mq.configDir, mq.TLO.Me.CleanName() or 'default')
+-- the character's name; a dead character's spawn is "<Name>'s corpse", which must not pick another settings file
+local ME = ((mq.TLO.Me.CleanName() or 'default'):gsub("'s corpse%d*$", ''))
+local CONFIG = string.format('%s/autoxp_%s.lua', mq.configDir, ME)
 local MODES = { 'Manual', 'Hunter', 'Assist', 'Chase' }
-local ROLES = { 'Off', 'Tank', 'DPS', 'Heal', 'CC', 'Emergency', 'Pull' }
+local ROLES = { 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Pull' }
+local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Pull' }
 
 -- settings (persisted) -------------------------------------------------------------------
 local S = {
-    mode = 'Hunter', role = 'Tank', heal = true, cc = false, ccStuns = '',
+    mode = 'Hunter', role = 'Tank', heal = true, cc = false, debuff = true, nuke = true, dot = true, buff = true, rez = false, ccStuns = '',
     zone = 'southro', travel = true,
     minlvl = 15, maxlvl = 25, radius = 1500, kills = 5,
     assistName = '', assistAt = 95, chaseName = '', chaseDist = 30,
     restPct = 50, restTo = 90,
-    selfHealPct = 50, groupHealPct = 40, emergencyPct = 20, healSpells = '',
+    selfHealPct = 50, groupHealPct = 40, tankHealPct = 75, emergencyPct = 20, healSpells = '',
     nukes = '', nukeManaMin = 30, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
     combatBuffs = 'Yaulp', stunCooldown = true, keepInFront = true,
-    avoidMobs = true, avoidRadius = 40, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
+    avoidMobs = true, avoidRadius = 100, pullVer = 0, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
     style = 'Auto', castRange = 100, mez = '', dots = '', debuffs = '', petSpell = '', usePet = true, class = '',
+    songs = '', restSongs = '', songManaMin = 10, fillVer = 0, swapGem = false,
+    defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true,
+    abilVer = 0, abilOrdered = false, abilFilter = 'All', pouchNames = 'Pouch of Quellious, Phantom Weapon Pack', showPeers = true, showHud = true,
     abilities = {},   -- { {name=, kind='skill'|'aa'|'disc', role=} }
 }
 local function loadConfig(path)
@@ -60,9 +66,11 @@ local R = {
     travelTarget = '', travelTries = 0, lastMoveAt = 0, lastPos = nil, mezzed = {}, petTarget = 0,
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
-    ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0,
+    ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0, nukeLevel = 0, nukeDebuff = nil,
+    mobCast = {}, buffTry = {}, buffChecked = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {},
 }
-local logf = io.open(mq.luaDir .. '/autoxp_log.txt', 'a')
+-- one log per character: several clients run AutoXP at once
+local logf = io.open(mq.luaDir .. '/autoxp_log_' .. ME .. '.txt', 'a')
 local function log(fmt, ...)
     local s = os.date('%H:%M:%S ') .. string.format(fmt, ...)
     table.insert(R.log, s)
@@ -76,11 +84,27 @@ local function hp() return mq.TLO.Me.PctHPs() or 100 end
 local function mana() return mq.TLO.Me.PctMana() or 0 end
 local function myId() return mq.TLO.Me.ID() or 0 end
 local function totalXp() return (mq.TLO.Me.Level() or 0) * 100 + (mq.TLO.Me.PctExp() or 0) end
-local function casting() return mq.TLO.Me.Casting() ~= nil end
+local DPS = {}   -- damage and session stats, filled in by the DPS section (before the UI)
+local function casting()
+    -- a bard keeps "casting" the song it holds; only the cast bar means busy
+    if mq.TLO.Me.Class.ShortName() == 'BRD' then return mq.TLO.Window('CastingWindow').Open() == true end
+    return mq.TLO.Me.Casting() ~= nil
+end
 local function spawn(id) return id and id > 0 and mq.TLO.Spawn('id ' .. id) or nil end
 -- dead = corpse; a living mob can read 0% HP (a sliver left), so HP% never means dead
 local function alive(s) return s and s() and s.Type() ~= 'Corpse' end
-local function save() mq.pickle(CONFIG, S) end
+-- a borrowed gem is saved too, so a reload in the middle of buffing still puts the spell back
+-- low on mana and should sit for it (bards don't: they sing their regen songs instead)
+-- low on mana or endurance and should sit for it
+local function manaLow()
+    if (mq.TLO.Me.MaxMana() or 0) > 0 and (mq.TLO.Me.PctMana() or 100) < S.restPct then return true end
+    return (mq.TLO.Me.PctEndurance() or 100) < S.restPct
+end
+
+local function save()
+    S.swapGem = R.swapGem and { g = R.swapGem.g, name = R.swapGem.name } or false
+    mq.pickle(CONFIG, S)
+end
 
 local function list(str)
     local out = {}
@@ -100,8 +124,8 @@ local function noticePick()
     if mq.gettime() - R.lastAssist < 1500 then return end   -- /assist targets for us
     local t = mq.TLO.Target
     local cls = t.Class.ID() or 0
-    -- combat classes only: never merchants, bankers or GMs
-    if id ~= R.pickId and t.Type() == 'NPC' and cls >= 1 and cls <= 16 and alive(spawn(id)) then
+    -- Tank role in Manual mode only (Hunter ignores clicks); combat classes only: never merchants, bankers or GMs
+    if S.role == 'Tank' and S.mode == 'Manual' and id ~= R.pickId and t.Type() == 'NPC' and cls >= 1 and cls <= 16 and alive(spawn(id)) then
         R.pickId = id
         log('you picked %s - fighting it', t.CleanName())
     end
@@ -117,10 +141,18 @@ local function targetId(id, timeout)
 end
 
 -- casters and priests fight from range; everyone else melees
-local RANGED = { WIZ = true, MAG = true, NEC = true, ENC = true, CLR = true, DRU = true, SHM = true }
+local RANGED = { WIZ = true, MAG = true, NEC = true, ENC = true, CLR = true, DRU = true, SHM = true, RNG = true }
 local function ranged()
     if S.style == 'Auto' then return RANGED[mq.TLO.Me.Class.ShortName() or ''] == true end
     return S.style == 'Ranged'
+end
+-- archery needs some distance: "too close" re-applies the stick that backs us up
+local ARCHERY = 40
+mq.event('axpTooClose', 'Your target is too close to use ranged combat#*#', function() R.tooCloseAt = mq.gettime() end)
+
+-- a ranger with a bow equipped: auto-fire from range instead of melee
+local function archer()
+    return ranged() and mq.TLO.Me.Class.ShortName() == 'RNG' and mq.TLO.Me.Inventory('ranged').Type() == 'Archery'
 end
 local function stick()
     if not ranged() then mq.cmd(S.role == 'Tank' and '/stick 8 moveback' or '/stick 8 behind moveback') end
@@ -148,10 +180,15 @@ local function attackOn()
     if R.targetId > 0 and targetId(R.targetId) then
         local t = spawn(R.targetId)
         if ranged() or not (t and (t.Distance3D() or 999) < 40) then mq.cmdf('/face fast id %d', R.targetId) else mq.cmd('/attack on') end
+        if archer() and not mq.TLO.Me.AutoFire() then mq.cmd('/autofire') end
         R.attacking = true
     end
 end
-local function attackOff() mq.cmd('/attack off'); R.attacking = false end
+local function attackOff()
+    mq.cmd('/attack off')
+    if mq.TLO.Me.AutoFire() then mq.cmd('/autofire') end
+    R.attacking = false
+end
 
 local function doPet(t)
     if not S.usePet or (mq.TLO.Me.Pet.ID() or 0) == 0 then return false end
@@ -192,40 +229,75 @@ local failedUntil = {}   -- spell/ability -> gettime() before which we don't ret
 local function backoff(name, why, ms) failedUntil[name] = mq.gettime() + (ms or 30000); log('%s failed (%s) - backing off', name, why) end
 local function blocked(name) return (failedUntil[name] or 0) > mq.gettime() end
 
+-- a spell that keeps fizzling or getting interrupted (untrained casting skill, low channeling) backs off
+local castFails = {}
+local function castFailed(spell, how)
+    if not spell or spell == '' then return end
+    local now, f = mq.gettime(), castFails[spell] or {}
+    table.insert(f, now)
+    while #f > 0 and now - f[1] > 30000 do table.remove(f, 1) end
+    castFails[spell] = f
+    if R.cast and R.cast.id then
+        R.rezzed[R.cast.id] = nil
+        if R.cast.kind == 'cc' then R.mezzed[R.cast.id] = nil end
+    end
+    if #f >= 3 then castFails[spell] = nil; backoff(spell, how .. ' 3 times in 30s', 60000) end
+end
+mq.event('axpFizzle', 'Your #1# spell fizzles!', function(_, spell) castFailed(spell, 'fizzled') end)
+mq.event('axpInterrupt1', 'Your #1# spell is interrupted.', function(_, spell) castFailed(spell, 'interrupted') end)
+mq.event('axpInterrupt2', 'Your spell is interrupted.', function() castFailed(R.cast and R.cast.name, 'interrupted') end)
+
 local function spellReady(name)
     if name == '' or blocked(name) then return false end
     return mq.TLO.Me.Gem(name)() ~= nil and mq.TLO.Me.SpellReady(name)()
 end
 
--- cast a gem spell on spawn id (self id for self/beneficial). Verifies the target before casting.
-local function castOn(name, id, why)
-    if not spellReady(name) or casting() then return false end
+-- memorized and off its own recast (while another spell casts, every gem reads "not ready")
+local function gemUp(name)
+    return name ~= '' and not blocked(name) and mq.TLO.Me.Gem(name)() ~= nil and (tonumber(mq.TLO.Me.GemTimer(name)()) or 0) == 0
+end
+
+-- start casting a gem spell on spawn id (self id for self/beneficial) and return; step() waits for it.
+-- kind 'heal' / 'cc' marks casts that are never ducked for a heal / a mez
+local function castOn(name, id, why, kind)
+    if not spellReady(name) or casting() or mq.TLO.Me.SpellInCooldown() or mq.TLO.Me.Stunned() then return false end
     local sp = mq.TLO.Spell(name)
     local selfOnly = sp() and (sp.TargetType() == 'Self')
     if not selfOnly and id and id > 0 and id ~= myId() then
         local s = spawn(id)
         if not s or not s() or not s.LineOfSight() or (s.Distance3D() or 999) > (sp.MyRange() or sp.Range() or 200) then return false end
+        if s.Type() == 'Corpse' and sp.TargetType() ~= 'Corpse' then return false end
+        if sp.TargetType() == 'Undead' and not (s.Body.Name() or ''):find('Undead') then return false end
     end
     if not selfOnly and id and id > 0 and not targetId(id) then backoff(name, 'could not target', 5000); return false end
     if mq.TLO.Me.Sitting() then mq.cmd('/stand'); mq.delay(300) end
-    local resume = holdMovement()
+    -- the book stays open briefly after memorizing ("too distracted to cast")
+    mq.delay(2000, function() return not mq.TLO.Window('SpellBookWnd').Open() end)
+    if mq.TLO.Window('SpellBookWnd').Open() then mq.cmd('/windowstate SpellBookWnd close'); mq.delay(300) end
+    local bard = mq.TLO.Me.Class.ShortName() == 'BRD'
+    local resume = bard and function() end or holdMovement()
+    if bard and mq.TLO.Me.Casting() then mq.cmd('/stopsong'); mq.delay(200) end
     mq.cmdf('/cast "%s"', name)
     mq.delay(1000, function() return casting() end)
-    if not casting() then resume(); backoff(name, why); restoreFight(); return false end
+    if not casting() then resume(); backoff(name, why, (kind == 'heal' or why == 'song') and 3000 or nil); restoreFight(); return false end
     log('cast %s -> %s (%s)', name, (id and id > 0) and (mq.TLO.Spawn('id ' .. id).CleanName() or id) or 'self', why)
-    mq.delay(12000, function() return not casting() end)
-    resume()
-    if id ~= R.targetId then restoreFight() end
+    R.cast = { name = name, id = id, kind = kind, resume = resume }
     return true
 end
 
 -- class abilities: skills (/doability), AAs (/alt act), disciplines (/disc)
-local function abilityReady(a)
-    if blocked(a.name) then return false end
+local function readyNow(a)
     if a.kind == 'skill' then return mq.TLO.Me.AbilityReady(a.name)() == true
     elseif a.kind == 'aa' then return mq.TLO.Me.AltAbilityReady(a.name)() == true
     elseif a.kind == 'disc' then return mq.TLO.Me.CombatAbilityReady(a.name)() == true end
     return false
+end
+
+local function abilityReady(a)
+    if blocked(a.name) or not readyNow(a) then return false end
+    if a.kind == 'skill' then return true end
+    local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
+    return not sp() or (sp.EnduranceCost() or 0) <= (mq.TLO.Me.CurrentEndurance() or 0)
 end
 
 local function useAbility(a, id, why)
@@ -233,21 +305,35 @@ local function useAbility(a, id, why)
     if id and id > 0 and id ~= myId() then
         local s = spawn(id)
         if not s or not s() or not s.LineOfSight() or (a.kind == 'skill' and (s.Distance3D() or 999) > 30) then return false end
+        if s.Type() == 'Corpse' then
+            local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
+            if a.kind == 'skill' or not sp() or sp.TargetType() ~= 'Corpse' then return false end
+        end
     end
     if id and id > 0 and not targetId(id) then return false end
     if a.kind == 'skill' then mq.cmdf('/doability "%s"', a.name)
     elseif a.kind == 'aa' then mq.cmdf('/alt act %d', mq.TLO.Me.AltAbility(a.name).ID() or 0)
     elseif a.kind == 'disc' then mq.cmdf('/disc %s', a.name) end
-    log('use %s %s (%s)', a.kind, a.name, why)
-    failedUntil[a.name] = mq.gettime() + 1500   -- debounce
-    mq.delay(300)
+    mq.delay(1000, function() return not readyNow(a) end)
     if id ~= R.targetId then restoreFight() end
+    if readyNow(a) then backoff(a.name, 'did not fire', 20000); return false end
+    log('use %s %s (%s)', a.kind, a.name, why)
     return true
+end
+
+-- feign death (SPA 74) drops aggro: never part of a rotation, only used by doShed
+local fdCache = {}
+local function dropsAggro(a)
+    if fdCache[a.name] == nil then
+        local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
+        fdCache[a.name] = a.name:lower():find('feign') ~= nil or (sp() and sp.HasSPA(74)() == true) or false
+    end
+    return fdCache[a.name]
 end
 
 local function abilitiesFor(role)
     local out = {}
-    for _, a in ipairs(S.abilities) do if a.role == role and a.enabled ~= false then table.insert(out, a) end end
+    for _, a in ipairs(S.abilities) do if a.role == role and a.enabled ~= false and not dropsAggro(a) then table.insert(out, a) end end
     return out
 end
 
@@ -264,36 +350,236 @@ end
 
 local COMBAT_SKILLS = { 'Taunt', 'Bash', 'Disarm', 'Kick', 'Slam', 'Intimidation', 'Round Kick', 'Flying Kick',
     'Tiger Claw', 'Eagle Strike', 'Dragon Punch', 'Backstab', 'Frenzy' }
+-- what an ability does, read from its spell and the spells it triggers: SPA -> base, duration, target
+local function abilitySpell(a)
+    if a.kind == 'aa' then return mq.TLO.Me.AltAbility(a.name).Spell end
+    if a.kind == 'disc' then return mq.TLO.Spell(a.name) end
+    return nil
+end
+
+local function spellFx(sp)
+    local fx, dur, tt = {}, sp.Duration.TotalSeconds() or 0, sp.TargetType() or ''
+    local function add(s)
+        for i = 1, (s.NumEffects() or 0) do
+            local at, b = s.Attrib(i)(), s.Base(i)()
+            if at and at ~= 254 and at ~= 10 and fx[at] == nil then fx[at] = b or 0 end
+        end
+    end
+    add(sp)
+    if fx[374] or fx[470] then
+        for i = 1, (sp.NumEffects() or 0) do
+            local tr = sp.Trigger(i)
+            if tr() then add(tr); dur = math.max(dur, tr.Duration.TotalSeconds() or 0) end
+        end
+    end
+    return fx, dur, tt
+end
+
+-- effects that make an ability offensive (only counted when positive)
+local OFFENSE = { [2] = true, [85] = true, [119] = true, [169] = true, [171] = true, [177] = true, [178] = true, [184] = true,
+    [185] = true, [186] = true, [200] = true, [216] = true, [220] = true, [279] = true, [294] = true, [330] = true,
+    [339] = true, [364] = true, [419] = true, [433] = true }
+
+-- Defense tiers: panic = short big absorb or block, mitigate = less melee damage taken, sustain = the rest
+local function defTier(fx, dur)
+    if fx[320] or (math.max(fx[161] or 0, fx[162] or 0, fx[55] or 0) >= 50 and dur <= 30) then return 'panic' end
+    if (fx[168] or 0) < 0 then return 'mitigate' end
+    return 'sustain'
+end
+
+local function descRole(d)
+    d = (d or ''):lower()
+    if d:find('hatred') or d:find('attention') or d:find('taunt') then return 'Tank' end
+    if d:find('absorb') or d:find('damage you take') or d:find('reducing damage done') or d:find('block') or d:find('parry')
+        or d:find('riposte') or d:find('mitigat') or d:find('withstand') then return 'Defense' end
+    if d:find('endurance to your pool') or (d:find('endurance') and (d:find('regenerat') or d:find('restor'))) then return 'Endurance' end
+    if d:find('critical') or d:find('accuracy') or d:find('damage of your') or d:find('melee damage') or d:find('haste')
+        or d:find('strikes') or d:find('attack') then return 'Offense' end
+    return nil
+end
+
+local UTILITY_SKILLS = { ['Bind Wound'] = true, ['Disarm Traps'] = true, ['Forage'] = true, ['Hide'] = true, ['Pick Lock'] = true,
+    ['Sense Heading'] = true, ['Sneak'] = true, ['Pick Pockets'] = true, ['Tracking'] = true, ['Fishing'] = true,
+    ['Sense Traps'] = true, ['Begging'] = true, ['Remove Trap'] = true }
+
+-- role from what the ability does: its effects, the game's category, then its description
+-- (names only for skills and Lay on Hands)
+local function classify(name, kind)
+    local n = name:lower()
+    if kind == 'skill' then
+        if n:find('taunt') then return 'Tank' end
+        if n:find('mend') then return 'Emergency' end
+        if n:find('feign') or n:find('intimidat') then return 'Off' end
+        return 'DPS'
+    end
+    if n:find('lay on hands') then return 'Emergency' end
+    local sp = abilitySpell({ name = name, kind = kind })
+    if not sp or not sp() then return defaultRole(name, kind) end
+    local fx, dur, tt = spellFx(sp)
+    local self, group = tt == 'Self', tt:find('^Group') ~= nil
+    local cat = '/' .. (sp.Category() or '') .. '/' .. (sp.Subcategory() or '') .. '/'
+    local function is(...) for _, w in ipairs({ ... }) do if cat:find('/' .. w .. '/', 1, true) then return true end end return false end
+    local function pos(k) return (fx[k] or 0) > 0 end
+    local off = false
+    for k in pairs(OFFENSE) do if pos(k) then off = true end end
+
+    if fx[74] then return 'Off' end                                   -- feign death: only to shed aggro (doShed)
+    if fx[26] or fx[83] or fx[88] or fx[104] or fx[145] then return 'Off' end   -- gate / teleport / evac: never automatic
+    if tt:find('^Pet') then return 'Off' end                          -- pet abilities aren't handled
+    if pos(92) or pos(192) or pos(114) or fx[444] or is('Hatred') then return 'Tank' end
+    if self and (fx[0] or 0) < 0 then return 'Off' end               -- costs your own health (HP -> mana)
+    -- real defense: a sizeable absorb, less damage taken, avoidance or block (a 5% rune riding on a burn isn't)
+    if (self or group) and ((fx[161] or 0) >= 20 or (fx[162] or 0) >= 20 or pos(55) or (fx[168] or 0) < 0 or (fx[172] or 0) >= 20
+        or fx[320] or fx[443] or fx[446] or fx[450] or fx[451] or fx[452]) then
+        return 'Defense', defTier(fx, dur)
+    end
+    if self and pos(189) and not off then return 'Endurance' end
+    if is('Quick Heal', 'Duration Heals') then return 'Heal' end
+    if not self and not group and (is('Resist Debuffs', 'Slow', 'Disempowering') or (fx[11] and fx[11] < 100)
+        or (fx[46] or 0) < 0 or (fx[47] or 0) < 0 or (fx[48] or 0) < 0 or (fx[49] or 0) < 0 or (fx[50] or 0) < 0) then
+        return 'Debuff'
+    end
+    if off then
+        if dur == 0 or not (self or group) then return 'DPS' end
+        -- by its own duration (bundled effects can last longer): 5 min+ or until cancelled is kept up, shorter is a burn
+        local own = sp.Duration.TotalSeconds() or 0
+        if own == 0 then own = dur end
+        if kind == 'disc' then return 'Burn' end                         -- discs share the one active slot
+        return (own < 0 or own >= 300) and 'Buff' or 'Burn'
+    end
+    if is('Offensive', 'Skill Attacks', 'Techniques', 'Melee Damage', 'Throwing') then return (self or group) and dur > 0 and 'Burn' or 'DPS' end
+    if pos(0) or pos(79) or pos(100) then
+        if pos(15) or pos(189) then return (self or group) and 'Buff' or 'Off' end   -- regen bundles (Paragon)
+        if not self or dur == 0 then return 'Heal' end
+    end
+    if fx[193] or (fx[0] or 0) < 0 then return 'DPS' end
+    if not self and fx[21] then return 'CC' end
+    if self and dur >= 120 then return 'Buff' end
+    local d = descRole(sp.Description())
+    if d == 'Offense' then return (self or group) and dur > 0 and 'Burn' or 'DPS' end
+    if d == 'Defense' then return 'Defense', defTier(fx, dur) end
+    return d or 'Off'
+end
+
+-- why an ability is or isn't ready, with the seconds left when there's a timer
+local function abilityCooldown(a)
+    local tm
+    if a.kind == 'disc' then tm = mq.TLO.Me.CombatAbilityTimer(a.name)
+    elseif a.kind == 'aa' then tm = mq.TLO.Me.AltAbilityTimer(a.name)
+    else tm = mq.TLO.Me.AbilityTimer(a.name) end
+    return tm and tm() and (tm.TotalSeconds() or 0) or 0
+end
+
+local function abilityStatus(a)
+    local back = (failedUntil[a.name] or 0) - mq.gettime()
+    if back > 0 then return 'backed off', 'AutoXP tried it and it did not fire - waiting before the next try', math.ceil(back / 1000) end
+    if readyNow(a) then return 'ready', 'Ready to use now', 0 end
+    local cd = abilityCooldown(a)
+    if cd > 0 then return 'cooldown', 'On cooldown (ranks of one line share it)', cd end
+    if a.kind == 'disc' and mq.TLO.Me.ActiveDisc() then return 'blocked', 'Another discipline is running: ' .. mq.TLO.Me.ActiveDisc(), 0 end
+    local sp = abilitySpell(a)
+    local cost = sp and sp() and (sp.EnduranceCost() or 0) or 0
+    if cost > (mq.TLO.Me.CurrentEndurance() or 0) then return 'blocked', string.format('Needs %d endurance', cost), 0 end
+    return 'not ready', "The game says it can't be used right now (something it needs isn't there)", 0
+end
+
+local function fmtSecs(s)
+    if s >= 60 then return string.format('%d:%02d', math.floor(s / 60), s % 60) end
+    return string.format('%ds', s)
+end
+
+-- when each role fires (Abilities tab tooltip)
+local ABILUSE = {
+    Off = 'Never used.', Tank = 'Tank role only: on cooldown in fights (Taunt when your aggro slips).',
+    DPS = 'On cooldown in fights.', Burn = 'On burns: a named mob, one at/above your level, 3+ mobs, or /autoxp burn.',
+    Defense = 'panic: below Panic HP %.  mitigate: below Defense HP %.\nsustain: while tanking a named or 2+ mobs, or below Defense HP %.',
+    Heal = 'When you or a group member are under the heal thresholds.', Emergency = 'When your HP is under the emergency %.',
+    CC = 'Interrupting a casting mob and stunning adds.', Buff = 'Kept up out of combat.',
+    Debuff = 'Debuff duty: once per mob, before the Debuffs list (malo on adds waiting for a mez first).',
+    Endurance = 'Out of combat when endurance is under the endurance %.', Pull = 'As the pull method.',
+}
+
+local ABILVER = 8   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
 local function scanAbilities()
-    local found, seen = {}, {}
+    local found, seen, oldPos = {}, {}, {}
+    for i, old in ipairs(S.abilities) do oldPos[old.name] = i end
     local function add(name, kind)
         if type(name) == 'string' and name ~= '' and name ~= 'NULL' and not seen[name] then
             seen[name] = true
-            local role, enabled = defaultRole(name, kind), true
-            for _, old in ipairs(S.abilities) do if old.name == name then enabled = old.enabled ~= false end end
-            table.insert(found, { name = name, kind = kind, role = role, enabled = enabled })
+            local role, tier = classify(name, kind)
+            local enabled, userRole = true, false
+            for _, old in ipairs(S.abilities) do
+                if old.name == name then
+                    enabled = old.enabled ~= false
+                    if old.userRole then role, userRole = old.role, true end
+                end
+            end
+            local sp = abilitySpell({ name = name, kind = kind })
+            local lvl = sp and sp() and (sp.Level() or 0) or 0
+            table.insert(found, { name = name, kind = kind, role = role, tier = tier, enabled = enabled, userRole = userRole,
+                lvl = lvl < 255 and lvl or 0, id = sp and sp() and sp.ID() or 0, timer = kind == 'disc' and sp and sp() and sp.RecastTimerID() or 0 })
         end
     end
-    -- combat skills the character actually has
-    for _, sk in ipairs(COMBAT_SKILLS) do
-        if (mq.TLO.Me.Skill(sk)() or 0) > 0 then add(sk, 'skill') end
+    -- activated combat skills the character has (Combat Skills page), minus utility ones
+    for i = 0, 100 do
+        local k = mq.TLO.Skill(i)
+        local sk = k() and k.Name()
+        if sk and k.Activated() and not UTILITY_SKILLS[sk] and (mq.TLO.Me.Skill(sk)() or 0) > 0 then add(sk, 'skill') end
     end
     -- combat abilities (disciplines)
     for i = 1, 300 do local c = mq.TLO.Me.CombatAbility(i)(); if type(c) == 'string' and c ~= '' then add(c, 'disc') end end
-    -- class AAs only (AA window Class tab = List3), owned and activatable
-    local l = mq.TLO.Window('AAWindow').Child('List3')
-    for r = 1, (l.Items() or 0) do
-        local name = l.List(r, 1)()
-        if type(name) == 'string' and mq.TLO.Me.AltAbility(name)() and mq.TLO.Me.AltAbility(name).Spell() then add(name, 'aa') end
+    -- class and archetype AAs (AA window Class tab = List3, Archetype = List2), owned and activatable; the lists fill
+    -- once the window is open
+    local w = mq.TLO.Window('AAWindow')
+    local opened = false
+    if not w.Open() then
+        w.DoOpen(); opened = true
+        mq.delay(2000, function() return (w.Child('List3').Items() or 0) > 0 end)
     end
-    S.abilities = found
+    for _, tab in ipairs({ 'List3', 'List2' }) do   -- Class, then Archetype (Malaise, Wind of Malaise...)
+        local l = w.Child(tab)
+        for r = 1, (l.Items() or 0) do
+            local name = l.List(r, 1)()
+            if type(name) == 'string' and mq.TLO.Me.AltAbility(name)() and mq.TLO.Me.AltAbility(name).Spell() then add(name, 'aa') end
+        end
+    end
+    if opened then w.DoClose() end
+    -- ranks of one line share a timer: keep the best (highest level, then newest) in each role, the rest Off
+    local best = {}
+    for _, a in ipairs(found) do
+        if a.timer > 0 and a.role ~= 'Off' and not a.userRole then
+            local k = a.role .. '|' .. a.timer
+            if not best[k] or a.lvl > best[k].lvl or (a.lvl == best[k].lvl and a.id > best[k].id) then best[k] = a end
+        end
+    end
+    for _, a in ipairs(found) do
+        local k = a.timer > 0 and not a.userRole and (a.role .. '|' .. a.timer)
+        if k and best[k] and best[k] ~= a then a.role, a.note = 'Off', 'older rank' end
+    end
+    -- discs under half my level (Resistant, Fearless...) aren't worth an automatic slot
+    local half = math.floor((mq.TLO.Me.Level() or 0) / 2)
+    for _, a in ipairs(found) do
+        if a.kind == 'disc' and a.lvl > 0 and a.lvl < half and not a.userRole and a.role ~= 'Off' then
+            if a.role == 'Defense' then a.tier = 'panic'                     -- still a panic button
+            else a.role, a.note = 'Off', 'low level' end
+        end
+    end
+    -- your order if you've arranged it, else newest first
+    if S.abilOrdered then
+        table.sort(found, function(a, b) return (oldPos[a.name] or 10000 + a.id) < (oldPos[b.name] or 10000 + b.id) end)
+    else
+        table.sort(found, function(a, b) if a.lvl ~= b.lvl then return a.lvl > b.lvl end return a.id > b.id end)
+    end
+    S.abilities, S.abilVer = found, ABILVER
     log('scanned %d abilities', #found)
-    for _, a in ipairs(found) do log('  %s %-24s -> %s', a.kind, a.name, a.role) end
+    for _, a in ipairs(found) do
+        if a.role ~= 'Off' then log('  %s %-28s -> %s%s', a.kind, a.name, a.role, a.tier and (' (' .. a.tier .. ')') or '') end
+    end
     save()
 end
 local mapRadius = -1
 local function updateMapRadius()
-    local want = (R.running and S.mode == 'Hunter' and S.showRadius) and S.radius or 0
+    local want = (R.running and S.mode == 'Hunter') and S.radius or 0
     if want ~= mapRadius then
         mq.cmdf('/mapfilter SpellRadius %d', want)
         mapRadius = want
@@ -369,18 +655,96 @@ local function gemSig()
     return table.concat(g, '|')
 end
 
--- self buffs from the spell book: HP, stat, resist, haste and proc buffs of 10+ minutes, best of each line
+-- who a buff is for, by its effects: haste/attack/STR/DEX go to melee, mana regen/INT/WIS/max mana to
+-- classes that use mana, anything else (HP, AC, stamina, resists, Unity bundles) to everyone
+local buffWho, wantsBuff, hasBuff, buffStacks, refreshBuffs
+do   -- its tables and helpers stay out of the main chunk (LuaJIT allows it 200 locals)
+local MELEE = { WAR = true, PAL = true, SHD = true, MNK = true, ROG = true, BER = true, RNG = true, BST = true, BRD = true }
+local NOMANA = { WAR = true, MNK = true, ROG = true, BER = true }
+local MELEESPA = { [2] = true, [4] = true, [5] = true, [11] = true, [169] = true, [171] = true, [176] = true, [177] = true,
+    [182] = true, [184] = true, [185] = true, [186] = true, [216] = true, [220] = true, [279] = true, [330] = true, [364] = true }
+local CASTERSPA = { [8] = true, [9] = true, [15] = true, [97] = true, [294] = true }
+local COREPA = { [0] = true, [1] = true, [46] = true, [47] = true, [48] = true, [49] = true, [50] = true, [69] = true }
+local NOSPA = { [10] = true, [254] = true }
+
+-- a Unity spell lasts seconds and casts the real buffs; anything else is its own buff
+local function buffParts(sp)
+    local parts, seen = {}, {}
+    if (sp.Duration.TotalSeconds() or 0) < 600 then
+        for i = 1, (sp.NumEffects() or 0) do
+            local tr = sp.Trigger(i)
+            if tr() and not seen[tr.ID()] then seen[tr.ID()] = true; table.insert(parts, tr) end
+        end
+    end
+    if #parts == 0 then parts[1] = sp end
+    return parts
+end
+
+local function buffSecs(sp)
+    local d = 0
+    for _, part in ipairs(buffParts(sp)) do d = math.max(d, part.Duration.TotalSeconds() or 0) end
+    return d
+end
+
+local function buffSpas(sp)
+    local set = {}
+    for _, part in ipairs(buffParts(sp)) do
+        for i = 1, (part.NumEffects() or 0) do
+            local a = part.Attrib(i)()
+            if a and not NOSPA[a] then set[a] = true end
+        end
+    end
+    return set
+end
+
+local whoCache = {}
+function buffWho(name)
+    if whoCache[name] then return whoCache[name] end
+    local melee, caster, core = false, false, false
+    for a in pairs(buffSpas(mq.TLO.Spell(name))) do
+        if MELEESPA[a] then melee = true elseif CASTERSPA[a] then caster = true elseif COREPA[a] then core = true end
+    end
+    local who = (core or melee == caster) and 'all' or (melee and 'melee' or 'caster')
+    whoCache[name] = who
+    return who
+end
+
+function wantsBuff(cls, who, meleeSelf)
+    if who == 'melee' then return MELEE[cls] or meleeSelf end
+    if who == 'caster' then return not NOMANA[cls] end
+    return true
+end
+
+-- the buff (or any buff a Unity spell casts) is on me, or on s (a targeted spawn)
+function hasBuff(name, s)
+    for _, part in ipairs(buffParts(mq.TLO.Spell(name))) do
+        local n = part.Name()
+        if s then if s.Buff(n)() then return true end
+        elseif mq.TLO.Me.Buff(n)() or mq.TLO.Me.Song(n)() then return true end
+    end
+    return false
+end
+
+function buffStacks(name, onTarget)
+    for _, part in ipairs(buffParts(mq.TLO.Spell(name))) do
+        if (onTarget and part.StacksTarget() or not onTarget and part.Stacks()) then return true end
+    end
+    return false
+end
+
+-- buffs from the spell book: HP, stat, resist, haste and proc buffs of 10+ minutes (Unity spells count by
+-- what they cast), best of each line, skipping lines whose best is under half my level
 local BUFFCAT = { ['HP Buffs'] = true, ['Statistic Buffs'] = true }
 local BUFFSUB = { Haste = true, ['Combat Innates'] = true }
 local BUFFTT = { Self = true, Single = true, ['Group v1'] = true, ['Group v2'] = true }
-local function refreshBuffs()
+function refreshBuffs()
     local lvl = mq.TLO.Me.Level() or 0
     R.buffLevel = lvl
     local best = {}
     for i = 1, 1120 do
         local b = mq.TLO.Me.Book(i)
-        if b() and b.SpellType() == 'Beneficial' and (b.Level() or 0) <= lvl and BUFFTT[b.TargetType() or '']
-            and (BUFFCAT[b.Category() or ''] or BUFFSUB[b.Subcategory() or '']) and (b.Duration.TotalSeconds() or 0) >= 600 then
+        if b() and b.SpellType() == 'Beneficial' and (b.Level() or 0) <= lvl and (b.Level() or 0) >= math.floor(lvl / 2)
+            and BUFFTT[b.TargetType() or ''] and (BUFFCAT[b.Category() or ''] or BUFFSUB[b.Subcategory() or '']) and buffSecs(b) >= 600 then
             -- one per line; each resist (fire, cold, poison, disease, magic) is its own line
             local key = (b.Category() or '') .. '/' .. (b.Subcategory() or '')
             if b.Subcategory() == 'Resist Buff' then
@@ -389,28 +753,63 @@ local function refreshBuffs()
             if not best[key] or (b.Level() or 0) > best[key].lvl then best[key] = { name = b.Name(), lvl = b.Level() or 0 } end
         end
     end
-    local out = {}
-    for _, b in pairs(best) do table.insert(out, b) end
+    local out, unity = {}, {}
+    for _, b in pairs(best) do
+        local sp = mq.TLO.Spell(b.name)
+        if buffParts(sp)[1].ID() ~= sp.ID() then for a in pairs(buffSpas(sp)) do unity[a] = true end end
+    end
+    for _, b in pairs(best) do
+        local sp, covered = mq.TLO.Spell(b.name), nil
+        if buffParts(sp)[1].ID() == sp.ID() then
+            for a in pairs(buffSpas(sp)) do covered = (covered ~= false) and unity[a] == true end
+        end
+        if not covered then table.insert(out, b) end
+    end
     table.sort(out, function(a, b) return a.lvl > b.lvl end)
     local names = {}
     for _, b in ipairs(out) do table.insert(names, b.name) end
     local s = table.concat(names, ', ')
-    if s ~= S.buffs then S.buffs = s; log('self buffs from the book: %s', s) end
+    if s ~= S.buffs then S.buffs = s; log('buffs from the book: %s', s) end
+end
 end
 
+local DEBUFFSUB = { Slow = true, ['Resist Debuffs'] = true, Disempowering = true }
+local SONGTT = { Self = true, ['Group v1'] = true, ['Group v2'] = true, ['AE PC v2'] = true }
+-- a song that regenerates health/mana for the group (Chorus, Pulse) or bursts it (Crescendo)
+local function REGENSONG(sp)
+    return sp.SpellType() == 'Beneficial' and (sp.Category() == 'Regen' or (sp.HasSPA(15)() and (sp.TargetType() or ''):find('^Group')))
+end
+-- the casting skill is trained enough (75% of its cap) not to fizzle all the time
+local function trained(sp)
+    local sk = sp.Skill() or ''
+    local cap = mq.TLO.Me.SkillCap(sk)() or 0
+    return cap == 0 or (mq.TLO.Me.Skill(sk)() or 0) >= cap * 0.75
+end
+
+local FILLVER = 5   -- bump when the gem classification changes, to refill every character's lists once
+
 local function fillFromGems()
-    local heals, stuns, nukes, mez, dots, debuffs, pet = {}, {}, {}, {}, {}, {}, ''
+    local heals, stuns, nukes, mez, dots, debuffs, songs, rest, pet = {}, {}, {}, {}, {}, {}, {}, {}, ''
+    local untrained = {}
+    local bard = mq.TLO.Me.Class.ShortName() == 'BRD'
     for g = 1, 13 do
         local sp = mq.TLO.Me.Gem(g)
         if sp() then
             local name, cat, sub = sp.Name(), sp.Category() or '', sp.Subcategory() or ''
             local bene = sp.SpellType() == 'Beneficial'
-            if cat == 'Heals' and sub == 'Heals' then table.insert(heals, name)
-            elseif sub:find('Stun') then table.insert(stuns, name)
-            elseif sub == 'Enthrall' then table.insert(mez, name)
-            elseif sub == 'Slow' then table.insert(debuffs, name)
+            if not bene and not trained(sp) then table.insert(untrained, name)
+            elseif bard and bene then
+                if SONGTT[sp.TargetType() or ''] then table.insert(songs, name) end
+                if REGENSONG(sp) then table.insert(rest, name) end
+            elseif cat == 'Heals' and (sub == 'Heals' or sub == 'Quick Heal' or sub == 'Duration Heals') then table.insert(heals, name)
+            elseif sub:find('Stun') then
+                table.insert(stuns, name)
+                if not bene and cat == 'Direct Damage' and sp.HasSPA(0)() then table.insert(nukes, name) end
+            elseif sub == 'Enthrall' and (sp.TargetType() == 'Single' or sp.TargetType() == 'PB AE' or sp.TargetType() == 'Targeted AE') then table.insert(mez, name)
+            elseif not bene and DEBUFFSUB[sub] and sp.TargetType() == 'Single' then table.insert(debuffs, name)
             elseif not bene and cat == 'Direct Damage' then table.insert(nukes, name)
             elseif not bene and cat == 'Damage Over Time' then table.insert(dots, name)
+            elseif cat == 'Pet' and sub == 'Sum: Swarm' then table.insert(nukes, name)
             elseif cat == 'Pet' and sub:find('^Sum:') then pet = name end
         end
     end
@@ -418,17 +817,22 @@ local function fillFromGems()
     S.healSpells, S.stuns, S.nukes = table.concat(heals, ', '), table.concat(stuns, ', '), table.concat(nukes, ', ')
     refreshBuffs()
     S.ccStuns, S.mez, S.dots, S.debuffs, S.petSpell = S.stuns, table.concat(mez, ', '), table.concat(dots, ', '), table.concat(debuffs, ', '), pet
-    log('from gems: heals=[%s] stuns=[%s] nukes=[%s] dots=[%s] mez=[%s] slows=[%s] pet=[%s] buffs=[%s]',
-        S.healSpells, S.stuns, S.nukes, S.dots, S.mez, S.debuffs, S.petSpell, S.buffs)
+    if bard then S.songs, S.restSongs = table.concat(songs, ', '), table.concat(rest, ', ') end
+    if #untrained > 0 then log('not using %s: casting skill too low (they fizzle)', table.concat(untrained, ', ')) end
+    S.fillVer = FILLVER
+    log('from gems: heals=[%s] stuns=[%s] nukes=[%s] dots=[%s] mez=[%s] debuffs=[%s] pet=[%s] buffs=[%s]%s',
+        S.healSpells, S.stuns, S.nukes, S.dots, S.mez, S.debuffs, S.petSpell, S.buffs, bard and (' songs=[' .. S.songs .. ']') or '')
     pickPullSpell()
 end
+
+local TANKS = { WAR = true, PAL = true, SHD = true }
 
 -- first start on a character (or a different class): build ability and spell lists from the game
 local function autoSetup()
     local cls = mq.TLO.Me.Class.ShortName() or ''
     if S.class == cls then return end
     log('setting up for %s (%s)', cls, ranged() and 'ranged' or 'melee')
-    S.class, S.role = cls, RANGED[cls] and 'DPS' or S.role
+    S.class, S.role = cls, TANKS[cls] and 'Tank' or 'DPS'
     local ok, err = pcall(scanAbilities)
     if not ok then log('scan failed: %s', tostring(err)) end
     fillFromGems()
@@ -438,6 +842,7 @@ local function stopAll(reason)
     attackOff(); mq.cmd('/stick off'); mq.cmd('/nav stop'); petBackOff()
     if R.state == 'TRAVEL' then mq.cmd('/travelto stop') end
     if R.swapGem and R.swapGem.name ~= '' then mq.cmdf('/memspell %d "%s"', R.swapGem.g, R.swapGem.name) end
+    if R.cast then R.cast.resume(); R.cast = nil end
     R.running = false; R.paused = false; R.targetId, R.pickId, R.swapGem = 0, 0, nil
     setState('IDLE')
     updateMapRadius()
@@ -446,19 +851,25 @@ local function stopAll(reason)
 end
 
 local function start()
-    R.running, R.paused, R.kills = true, false, 0
+    R.running, R.paused, R.kills, R.nukeLevel, R.healMemLevel, R.lastRoles, R.rolesWarned = true, false, 0, 0, -1, 0, false
     R.xp0, R.aa0, R.started = totalXp(), mq.TLO.Me.PctAAExp() or 0, mq.gettime()
-    log('start: mode=%s role=%s heal=%s cc=%s zone=%s', S.mode, S.role, S.heal and 'on' or 'off', S.cc and 'on' or 'off', S.zone)
+    log('start: mode=%s role=%s heal=%s cc=%s debuff=%s nuke=%s dot=%s buff=%s rez=%s zone=%s', S.mode, S.role, S.heal and 'on' or 'off',
+        S.cc and 'on' or 'off', S.debuff and 'on' or 'off', S.nuke and 'on' or 'off', S.dot and 'on' or 'off', S.buff and 'on' or 'off',
+        S.rez and 'on' or 'off', S.zone)
     autoSetup()
+    if S.swapGem and not R.swapGem then R.swapGem = { g = S.swapGem.g, name = S.swapGem.name } end
+    if S.fillVer ~= FILLVER then fillFromGems() end
+    if (S.pullVer or 0) < 1 then
+        -- mobs 40 away came along with "alone" pulls (Sleeper's Tomb): the old default goes to the new one
+        if S.avoidRadius == 40 then S.avoidRadius = 100; log('alone radius 40 -> 100 (the new default)') end
+        S.pullVer = 1
+    end
+    if S.abilVer ~= ABILVER then local ok, err = pcall(scanAbilities); if not ok then log('scan failed: %s', tostring(err)) end end
     if S.pullSpell == '' then pickPullSpell() end
     if #S.abilities == 0 then local ok, err = pcall(scanAbilities); if not ok then log('scan failed: %s', tostring(err)) end end
     save()
     updateMapRadius()
-    if S.mode == 'Hunter' and S.travel and mq.TLO.Zone.ShortName() ~= S.zone then
-        mq.cmdf('/travelto %s', S.zone); R.travelTarget, R.travelTries = S.zone, 0; setState('TRAVEL')
-    else
-        setState('BUFF')
-    end
+    setState('BUFF')   -- a Hunter in the wrong zone travels from step(), once nothing holds it back
 end
 
 -- target priority (tank): casters > healers > hybrids > melee -------------------------------
@@ -482,6 +893,48 @@ local function mezzed(s)
     return (mq.TLO.Target.ID() or 0) == s.ID() and mq.TLO.Target.Mezzed() ~= nil
 end
 
+-- someone (me or a group member in range) is below the heal thresholds
+local function healTargets()
+    local mt = mq.TLO.Group.MainTank.ID() or 0
+    local out = {}
+    local function add(id, name, pct, limit)
+        if pct < limit then table.insert(out, { id = id, name = name, pct = pct, urgency = pct - limit }) end
+    end
+    add(myId(), 'self', hp(), myId() == mt and math.max(S.selfHealPct, S.tankHealPct) or S.selfHealPct)
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        if m() and m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse' and (m.Distance() or 999) < 150 then
+            local id = m.ID() or 0
+            add(id, m.CleanName() or '?', m.PctHPs() or 100, id == mt and S.tankHealPct or S.groupHealPct)
+        end
+    end
+    table.sort(out, function(a, b) return a.urgency < b.urgency end)
+    return out
+end
+
+local function hurt() return #healTargets() > 0 end
+
+-- nothing on XTarget and nobody hurt: safe to memorize or stand around buffing
+local function quiet() return #hostiles() == 0 and not hurt() end
+
+-- mez breaks: forget the mez so the add gets mezzed again right away
+local function unmez(name)
+    name = (name or ''):lower()
+    for _, s in ipairs(hostiles()) do if (s.CleanName() or ''):lower() == name then R.mezzed[s.ID()] = nil end end
+end
+mq.event('axpWake', '#1# has been awakened by #2#.', function(_, who) unmez(who) end)
+mq.event('axpWorn', 'Your #1# spell has worn off of #2#.', function(_, _, who) unmez(who) end)
+mq.event('axpResist', '#1# resisted your #2#!', function(_, who, spell)
+    -- a resisted debuff isn't on that mob: try it again
+    local name = who:lower()
+    for _, s in ipairs(hostiles()) do
+        if (s.CleanName() or ''):lower() == name then R.mobCast[s.ID() .. '|' .. spell] = nil end
+    end
+    for _, m in ipairs(list(S.mez)) do
+        if m == spell then unmez(who); log('%s resisted %s - mezzing again', who, spell); return end
+    end
+end)
+
 local function bestTarget()
     local best, bp, bm
     for _, s in ipairs(hostiles()) do
@@ -494,6 +947,33 @@ local function bestTarget()
     return best, bp
 end
 
+-- bards: keep the Songs list going in order (re-sing with 3s or less left) and the Selo's run-speed AA
+-- up for the group; songs that cost mana wait while mana is under songManaMin %, except regen songs
+local SELO = "Selo's Sonata"
+local function songUp(name)
+    local s = mq.TLO.Me.Song(name)
+    if not s() then s = mq.TLO.Me.Buff(name) end
+    return s() and (s.Duration.TotalSeconds() or 0) > 3
+end
+
+local function doSongs()
+    if mq.TLO.Me.Class.ShortName() ~= 'BRD' or casting() then return false end
+    local aa = mq.TLO.Me.AltAbility(SELO)
+    if aa() and mq.TLO.Me.AltAbilityReady(SELO)() then
+        local tr = aa.Spell.Trigger(1)
+        -- let it finish: a song started right after it doesn't take
+        if not tr() or not songUp(tr.Name()) then mq.cmdf('/alt act %d', aa.ID()); mq.delay(800); return true end
+    end
+    local calm = #hostiles() == 0 and R.state ~= 'FIGHT'
+    for _, s in ipairs(list(calm and S.restSongs ~= '' and S.restSongs or S.songs)) do
+        local sp = mq.TLO.Spell(s)
+        if sp() and not songUp(s) and spellReady(s) and ((sp.Mana() or 0) == 0 or mana() >= S.songManaMin or sp.Category() == 'Regen') then
+            if castOn(s, myId(), 'song') then return true end
+        end
+    end
+    return false
+end
+
 -- roles -----------------------------------------------------------------------------------
 local function doHeal()
     if not S.heal then return false end
@@ -501,30 +981,88 @@ local function doHeal()
     if hp() < S.emergencyPct then
         for _, a in ipairs(abilitiesFor('Emergency')) do if useAbility(a, myId(), string.format('emergency %d%%', hp())) then return true end end
     end
-    local heals = list(S.healSpells)
-    local function tryHeal(id, why)
-        for _, a in ipairs(abilitiesFor('Heal')) do if useAbility(a, id, why) then return true end end
-        for _, h in ipairs(heals) do if castOn(h, id, why) then return true end end
-        return false
+    -- the heal list split: single-target heals, group heals, heals over time
+    local single, group, hot = {}, {}, {}
+    for _, h in ipairs(list(S.healSpells)) do
+        local sp = mq.TLO.Spell(h)
+        if sp() then
+            if sp.Subcategory() == 'Duration Heals' then table.insert(hot, h)
+            elseif (sp.TargetType() or ''):find('^Group') then table.insert(group, h)
+            else table.insert(single, h) end
+        end
     end
-    if hp() < S.selfHealPct and tryHeal(myId(), string.format('self %d%%', hp())) then return true end
-    for i = 1, (mq.TLO.Group.Members() or 0) do
-        local m = mq.TLO.Group.Member(i)
-        if m() and m.Present() and not m.OtherZone() and (m.PctHPs() or 100) < S.groupHealPct and (m.Distance() or 999) < 150 then
-            if tryHeal(m.ID(), string.format('%s %d%%', m.CleanName(), m.PctHPs())) then return true end
+    local who = healTargets()
+    if #who > 0 then
+        local t = who[1]
+        local why = string.format('%s %d%%', t.name, t.pct)
+        -- two or more hurt: a group heal reaches them all
+        if #who >= 2 then
+            for _, g in ipairs(group) do if castOn(g, myId(), string.format('%d hurt, %s', #who, why), 'heal') then return true end end
+        end
+        -- under 35%: instant heal abilities, then the fastest heal; otherwise the biggest heal, abilities kept for later
+        local urgent = t.pct < 35
+        if urgent then
+            for _, a in ipairs(abilitiesFor('Heal')) do if useAbility(a, t.id, why) then return true end end
+            table.sort(single, function(a, b) return (mq.TLO.Spell(a).MyCastTime() or 0) < (mq.TLO.Spell(b).MyCastTime() or 0) end)
+        end
+        for _, h in ipairs(single) do if castOn(h, t.id, why, 'heal') then return true end end
+        -- single heals all on cooldown: a group heal still reaches them, then the abilities
+        for _, g in ipairs(group) do if castOn(g, myId(), why, 'heal') then return true end end
+        if not urgent then
+            for _, a in ipairs(abilitiesFor('Heal')) do if useAbility(a, t.id, why) then return true end end
+        end
+    end
+    -- heals-over-time kept up while the tank is fighting and has taken any damage: a group one while it's not on me,
+    -- a single-target one on the tank, again when it runs out
+    if #hot > 0 and #hostiles() > 0 then
+        local mt = mq.TLO.Group.MainTank
+        if mt() and mt.Type() ~= 'Corpse' and (mt.PctHPs() or 100) < 95 then
+            local why = string.format('HoT, tank %d%%', mt.PctHPs() or 0)
+            for _, h in ipairs(hot) do
+                local sp = mq.TLO.Spell(h)
+                if sp.TargetType() == 'Single' then
+                    if mq.gettime() >= (R.hotUntil[h .. mt.ID()] or 0) and castOn(h, mt.ID(), why, 'heal') then
+                        R.hotUntil[h .. mt.ID()] = mq.gettime() + (sp.Duration.TotalSeconds() or 18) * 1000
+                        return true
+                    end
+                elseif not hasBuff(h) and castOn(h, myId(), why, 'heal') then return true end
+            end
         end
     end
     return false
 end
 
+-- CC duty: mez the adds - never my target or the tank's (the group main assist's). Two or more awake adds around
+-- me take an AE mez (PB AE / targeted AE in the Mez list); otherwise one at a time, nearest first (castOn checks
+-- each mez's own range and line of sight)
 local function doCC(t)
     if not S.cc or hp() < 40 then return false end
     local adds = hostiles()
     if #adds > 1 then
+        local keep = { [R.targetId] = true, [mq.TLO.Me.GroupAssistTarget.ID() or 0] = true }
+        local single = {}
+        for _, m in ipairs(list(S.mez)) do
+            local sp = mq.TLO.Spell(m)
+            local tt = sp.TargetType() or ''
+            if tt == 'Single' then table.insert(single, m)
+            elseif gemUp(m) then
+                local r = (sp.AERange() or 0) > 0 and sp.AERange() or 30
+                local near = {}
+                for _, x in ipairs(adds) do
+                    if not keep[x.ID()] and not mezzed(x) and (x.Distance3D() or 999) <= r then table.insert(near, x) end
+                end
+                if #near >= 2 and castOn(m, tt == 'Targeted AE' and near[1].ID() or myId(), string.format('AE mez, %d adds', #near), 'cc') then
+                    local untilT = mq.gettime() + ((sp.Duration.TotalSeconds() or 18) - 6) * 1000
+                    for _, x in ipairs(near) do R.mezzed[x.ID()] = untilT end
+                    return true
+                end
+            end
+        end
+        table.sort(adds, function(a, b) return (a.Distance3D() or 999) < (b.Distance3D() or 999) end)
         for _, x in ipairs(adds) do
-            if x.ID() ~= R.targetId and not mezzed(x) and (x.Distance() or 999) < S.castRange then
-                for _, m in ipairs(list(S.mez)) do
-                    if castOn(m, x.ID(), 'mez add') then
+            if not keep[x.ID()] and not mezzed(x) then
+                for _, m in ipairs(single) do
+                    if castOn(m, x.ID(), 'mez add', 'cc') then
                         R.mezzed[x.ID()] = mq.gettime() + ((mq.TLO.Spell(m).Duration.TotalSeconds() or 18) - 6) * 1000
                         return true
                     end
@@ -535,12 +1073,12 @@ local function doCC(t)
     local stuns = list(S.ccStuns)
     if t and alive(t) and t.Casting() and t.Distance() < 60 then
         for _, a in ipairs(abilitiesFor('CC')) do if useAbility(a, t.ID(), 'interrupt') then return true end end
-        for _, s in ipairs(stuns) do if castOn(s, t.ID(), 'interrupt') then return true end end
+        for _, s in ipairs(stuns) do if castOn(s, t.ID(), 'interrupt', 'cc') then return true end end
     end
     for _, x in ipairs(hostiles()) do
         if x.ID() ~= R.targetId and x.Distance() < 60 then
             for _, a in ipairs(abilitiesFor('CC')) do if useAbility(a, x.ID(), 'add') then return true end end
-            for _, s in ipairs(stuns) do if castOn(s, x.ID(), 'add') then return true end end
+            for _, s in ipairs(stuns) do if castOn(s, x.ID(), 'add', 'cc') then return true end end
         end
     end
     return false
@@ -618,18 +1156,220 @@ local function doTank(t)
     return false
 end
 
+-- my spell is still on the mob: it (or a spell it triggers) shows on the target, or I cast it on this mob
+-- in the last 15s (resisted, or not listed yet)
+local function onMob(t, name)
+    if t.MyBuff(name)() then return true end
+    local sp = mq.TLO.Spell(name)
+    if (sp.Duration.TotalSeconds() or 0) == 0 then
+        for i = 1, (sp.NumEffects() or 0) do
+            local tr = sp.Trigger(i)
+            if tr() and t.MyBuff(tr.Name())() then return true end
+        end
+    end
+    return mq.gettime() < (R.mobCast[t.ID() .. '|' .. name] or 0)
+end
+
+-- counted as on the mob for its duration (15s to 2 min) when the buff can't be seen; a resist clears it
+local function castOnMob(name, t, why)
+    if not castOn(name, t.ID(), why) then return false end
+    local secs = math.min(120, math.max(15, mq.TLO.Spell(name).Duration.TotalSeconds() or 15))
+    R.mobCast[t.ID() .. '|' .. name] = mq.gettime() + secs * 1000
+    return true
+end
+
+local DEB = {}   -- debuff helpers (one table: the main chunk is near LuaJIT's 200-local limit)
+-- my debuffs: the Debuff abilities first (Malaise, Sha's Reprisal...: instant), then the Debuffs list. Each has a kind
+-- (malo, slow, cripple) and a mob gets one of each kind - an ability on cooldown falls back to the spell
+function DEB.kind(sp)
+    local sub = sp.Subcategory() or ''
+    local fx = spellFx(sp)
+    for spa = 46, 50 do if (fx[spa] or 0) < 0 then return 'malo' end end
+    if sub == 'Resist Debuffs' then return 'malo' end
+    if sub == 'Slow' or (fx[11] and fx[11] < 100) then return 'slow' end
+    if sub == 'Disempowering' then return 'cripple' end
+    return sub
+end
+
+function DEB.list()
+    if R.dlist and mq.gettime() - R.dlistAt < 5000 then return R.dlist end
+    local out = {}
+    for _, a in ipairs(abilitiesFor('Debuff')) do
+        local sp = abilitySpell(a)
+        if sp and sp() then table.insert(out, { abil = a, spell = sp.Name(), kind = DEB.kind(sp), dmg = sp.HasSPA(0)() }) end
+    end
+    for _, d in ipairs(list(S.debuffs)) do
+        local sp = mq.TLO.Spell(d)
+        if sp() then table.insert(out, { spell = d, kind = DEB.kind(sp), dmg = sp.HasSPA(0)() }) end
+    end
+    R.dlist, R.dlistAt = out, mq.gettime()
+    return out
+end
+
+function DEB.has(m, dl, kind)
+    for _, e in ipairs(dl) do if e.kind == kind and onMob(m, e.spell) then return true end end
+    return false
+end
+
+function DEB.on(m, e, why)
+    if not e.abil then return castOnMob(e.spell, m, why) end
+    if not useAbility(e.abil, m.ID(), why) then return false end
+    R.mobCast[m.ID() .. '|' .. e.spell] = mq.gettime() + math.min(120, math.max(15, mq.TLO.Spell(e.spell).Duration.TotalSeconds() or 15)) * 1000
+    return true
+end
+
+-- Debuff duty: slow, malo and cripple the target, then each add (a malo'd add takes a mez far more often, a slowed
+-- one hits softer). A mezzed add only gets debuffs that do no damage, so the mez holds
+local function doDebuff(t)
+    if not S.debuff then return false end
+    local mobs = {}
+    if alive(t) and (t.PctHPs() or 0) > 40 then table.insert(mobs, t) end
+    for _, x in ipairs(hostiles()) do
+        if x.ID() ~= (alive(t) and t.ID() or 0) and (x.PctHPs() or 0) > 40 and x.LineOfSight() then table.insert(mobs, x) end
+    end
+    local dl = DEB.list()
+    for _, m in ipairs(mobs) do
+        local asleep = m ~= t and mezzed(m)
+        for _, e in ipairs(dl) do
+            if not DEB.has(m, dl, e.kind) and not (asleep and e.dmg) and DEB.on(m, e, m == t and 'debuff' or 'debuff add') then return true end
+        end
+    end
+    return false
+end
+
+local function topAggro()
+    if (mq.TLO.Me.PctAggro() or 0) >= 100 then return true end
+    for i = 1, (mq.TLO.Me.XTarget() or 0) do
+        if (mq.TLO.Me.XTarget(i).PctAggro() or 0) >= 100 then return true end
+    end
+    return false
+end
+
+local function doShed(t)
+    if S.role ~= 'DPS' or (mq.TLO.Group.Members() or 0) == 0 or mq.TLO.Me.Feigning() or not topAggro() then return false end
+    for _, a in ipairs(S.abilities) do
+        if a.enabled ~= false and dropsAggro(a) and useAbility(a, R.targetId, 'drop aggro') then
+            R.feignAt = mq.gettime(); attackOff(); mq.cmd('/stick off')
+            return true
+        end
+    end
+    return false
+end
+
+local function abilityUp(a)
+    local sp = abilitySpell(a)
+    if not sp or not sp() then return false end
+    if (mq.TLO.Me.ActiveDisc.ID() or 0) == sp.ID() then return true end
+    return hasBuff(sp.Name())
+end
+
+-- Defense abilities by tier: panic below panicPct, mitigate below defPct, sustain (Carapace / Mantle style)
+-- while tanking a named mob or 2+ mobs, or below defPct
+local function doDefense()
+    local mobs = hostiles()
+    if #mobs == 0 then return false end
+    local h, t = hp(), spawn(R.targetId)
+    local tanking = S.role == 'Tank' or topAggro()
+    for _, a in ipairs(abilitiesFor('Defense')) do
+        local tier = a.tier or 'sustain'
+        local want = (tier == 'panic' and h < S.panicPct) or (tier == 'mitigate' and h < S.defPct)
+            or (tier == 'sustain' and tanking and (h < S.defPct or #mobs >= 2 or (alive(t) and t.Named())))
+        if want and not abilityUp(a) then
+            -- only one discipline runs at a time: stop an offensive one so the defensive one can start
+            local active = mq.TLO.Me.ActiveDisc()
+            local busy = false
+            if a.kind == 'disc' and active and active ~= a.name then
+                local def = false
+                for _, o in ipairs(S.abilities) do if o.name == active and o.role == 'Defense' then def = true end end
+                if def then busy = true                                       -- a defensive disc is already running
+                else log('stopping %s for %s', active, a.name); mq.cmd('/stopdisc'); mq.delay(300) end
+            end
+            if not busy and useAbility(a, nil, string.format('%s, HP %d%%', tier, h)) then return true end
+        end
+    end
+    return false
+end
+
+-- Burn abilities, in list order: on a named mob, one at/above my level, 3+ mobs, or /autoxp burn (60s)
+local function burning(t)
+    if mq.gettime() < R.burnUntil then return true end
+    if not alive(t) then return false end
+    return (S.burnNamed and t.Named()) or (S.burnLevel and (t.Level() or 0) >= (mq.TLO.Me.Level() or 0))
+        or (S.burnAdds and #hostiles() >= 3) or false
+end
+
+local function doBurn(t)
+    if not burning(t) then return false end
+    for _, a in ipairs(abilitiesFor('Burn')) do
+        if not abilityUp(a) and useAbility(a, nil, 'burn') then return true end
+    end
+    return false
+end
+
+-- out of combat: endurance discs below endPct, and long self buffs from abilities
+local function doEndurance()
+    if #hostiles() > 0 or (mq.TLO.Me.PctEndurance() or 100) >= S.endPct then return false end
+    for _, a in ipairs(abilitiesFor('Endurance')) do
+        if not abilityUp(a) and useAbility(a, nil, 'endurance') then return true end
+    end
+    return false
+end
+
+local function doAbilityBuffs()
+    if #hostiles() > 0 then return false end
+    for _, a in ipairs(abilitiesFor('Buff')) do
+        if not abilityUp(a) and useAbility(a, nil, 'buff') then return true end
+    end
+    return false
+end
+
+-- fight duties by class (heals always come first, in step): bards and enchanters CC then debuff
+-- (then songs), healers debuff then CC, everyone else CC then debuff
+local CCFIRST = { BRD = true, ENC = true }
+local HEALER = { CLR = true, DRU = true, SHM = true }
+-- Debuff duty, with a mezzer in the group (a bard or enchanter, or me on CC duty): the adds a mez is waiting on
+-- (not my target or the tank's) get the resist debuff (malo / tash) first, from any state - mezzes are resisted far
+-- less after it. A mezzed add only gets one that does no damage
+local function doMalo()
+    if not S.debuff then return false end
+    local adds = hostiles()
+    if #adds < 2 then return false end
+    local mezzer = S.cc
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        if m.Present() and CCFIRST[m.Class.ShortName() or ''] then mezzer = true end
+    end
+    if not mezzer then return false end
+    local tank = mq.TLO.Me.GroupAssistTarget.ID() or 0
+    local dl = DEB.list()
+    for _, x in ipairs(adds) do
+        if x.ID() ~= R.targetId and x.ID() ~= tank and (x.PctHPs() or 0) > 40 and x.LineOfSight() and not DEB.has(x, dl, 'malo') then
+            for _, e in ipairs(dl) do
+                if e.kind == 'malo' and not (mezzed(x) and e.dmg) and DEB.on(x, e, 'malo for mez') then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function doDuties(t)
+    local cls = mq.TLO.Me.Class.ShortName() or ''
+    if HEALER[cls] then return doDebuff(t) or doCC(t) end
+    if doCC(t) or doDebuff(t) then return true end
+    return CCFIRST[cls] and doSongs() or false
+end
+
 local function doDps(t)
     -- both roles use DPS abilities + nukes; Tank-only abilities/stuns are handled in doTank
     if not alive(t) then return false end
     for _, a in ipairs(abilitiesFor('DPS')) do if useAbility(a, t.ID(), 'dps') then return true end end
-    if (t.PctHPs() or 0) > 40 then
-        for _, d in ipairs(list(S.debuffs)) do if not t.MyBuff(d)() and castOn(d, t.ID(), 'slow') then return true end end
-    end
     if mana() < S.nukeManaMin then return false end
-    if (t.PctHPs() or 0) > 40 then
-        for _, d in ipairs(list(S.dots)) do if not t.MyBuff(d)() and castOn(d, t.ID(), 'dot') then return true end end
+    if S.dot and (t.PctHPs() or 0) > 40 then
+        for _, d in ipairs(list(S.dots)) do if not onMob(t, d) and castOnMob(d, t, 'dot') then return true end end
     end
-    for _, n in ipairs(list(S.nukes)) do if castOn(n, t.ID(), 'nuke') then return true end end
+    if S.nuke then
+        for _, n in ipairs(list(S.nukes)) do if castOn(n, t.ID(), 'nuke') then return true end end
+    end
     return false
 end
 
@@ -658,11 +1398,165 @@ local function upgradeGems()
         if best then
             log('memorizing %s (L%d) over %s (L%d) in gem %d', best.name, best.lvl, m.s.Name(), m.lvl, m.g)
             mq.cmdf('/memspell %d "%s"', m.g, best.name)
-            mq.delay(20000, function() return mq.TLO.Me.Gem(m.g).Name() == best.name or #hostiles() > 0 end)
+            mq.delay(20000, function() return mq.TLO.Me.Gem(m.g).Name() == best.name or not quiet() end)
             R.lastMemCheck = 0   -- look at the next gem right away
             return true
         end
     end
+    return false
+end
+
+-- keep the (Nuke duty) best plain nuke and undead nuke, (CC duty) single-target mez and (Debuff duty) slow, malo and cripple from the book memorized,
+-- in an empty gem or over the lowest self-buff gem (those buffs still get cast by borrowing a gem).
+-- Checked on start, level-up and when Nuke, Debuff or CC is toggled
+local function nukeKind(s)
+    if s.SpellType() == 'Beneficial' then return nil end
+    local sub, tt = s.Subcategory() or '', s.TargetType() or ''
+    if S.nuke and s.Category() == 'Direct Damage' and not sub:find('Stun') then
+        if tt == 'Undead' then return 'undead' end
+        if tt == 'Single' then return 'nuke' end
+    end
+    if S.debuff and DEBUFFSUB[sub] and tt == 'Single' then return sub end
+    if S.cc and sub == 'Enthrall' and tt == 'Single' then return 'Enthrall' end
+    if S.cc and sub == 'Enthrall' and (tt == 'PB AE' or tt == 'Targeted AE') then return 'EnthrallAE' end
+end
+
+local function memNukes()
+    local lvl = mq.TLO.Me.Level() or 0
+    if not S.autoMem or (R.nukeLevel == lvl and R.nukeDebuff == S.debuff and R.nukeCC == S.cc and R.nukeNuke == S.nuke) then return false end
+    local nukeGems = {}
+    local have, isBuff, buffGems, best = {}, {}, {}, {}
+    for _, b in ipairs(list(S.buffs)) do isBuff[b] = true end
+    for i = 1, (mq.TLO.Me.NumGems() or 8) do
+        local s = mq.TLO.Me.Gem(i)
+        if s() then
+            local k = nukeKind(s)
+            if k then
+                if trained(s) then have[k] = true else table.insert(buffGems, { g = i, lvl = -1, name = s.Name() }) end
+                if k == 'nuke' then table.insert(nukeGems, { g = i, lvl = s.Level() or 0, name = s.Name() }) end
+            end
+            if isBuff[s.Name()] then table.insert(buffGems, { g = i, lvl = s.Level() or 0, name = s.Name() }) end
+            -- a nuke whose duty is off (and that isn't the Hunter's pull spell) holds a free gem
+            if not S.nuke and not k and s.SpellType() ~= 'Beneficial' and s.Category() == 'Direct Damage'
+                and not (s.Subcategory() or ''):find('Stun') and not (S.mode == 'Hunter' and s.Name() == S.pullSpell) then
+                table.insert(buffGems, { g = i, lvl = s.Level() or 0, name = s.Name() })
+            end
+        else
+            table.insert(buffGems, { g = i, lvl = -1, name = '' })   -- empty gems first
+        end
+    end
+    for i = 1, 1120 do
+        local b = mq.TLO.Me.Book(i)
+        local k = b() and (b.Level() or 0) <= lvl and trained(b) and nukeKind(b)
+        if k and not have[k] and not blocked(b.Name()) and (not best[k] or b.Level() > best[k].lvl) then best[k] = { name = b.Name(), lvl = b.Level() or 0 } end
+    end
+    table.sort(buffGems, function(a, b) return a.lvl < b.lvl end)
+    table.sort(nukeGems, function(a, b) return a.lvl < b.lvl end)
+    for _, k in ipairs({ 'Enthrall', 'EnthrallAE', 'Slow', 'Resist Debuffs', 'Disempowering', 'undead', 'nuke' }) do
+        local n = best[k]
+        -- a mez may take the lowest nuke's gem when nothing else is free (bards have no spare gems)
+        local m = buffGems[1] or (k == 'Enthrall' and #nukeGems > 1 and nukeGems[1]) or nil
+        if n and m then
+            log('memorizing %s (L%d, %s) in gem %d%s', n.name, n.lvl, k, m.g, m.name ~= '' and (' over ' .. m.name) or '')
+            mq.cmdf('/memspell %d "%s"', m.g, n.name)
+            mq.delay(20000, function() return mq.TLO.Me.Gem(m.g).Name() == n.name or not quiet() end)
+            if mq.TLO.Me.Gem(m.g).Name() ~= n.name and #hostiles() == 0 then backoff(n.name, 'memorize', 600000) end
+            return true
+        end
+    end
+    R.nukeLevel, R.nukeDebuff, R.nukeCC, R.nukeNuke = lvl, S.debuff, S.cc, S.nuke
+    return false
+end
+
+local function usedSpells()
+    local used = {}
+    for _, k in ipairs({ 'healSpells', 'stuns', 'ccStuns', 'nukes', 'dots', 'debuffs', 'mez', 'buffs', 'combatBuffs', 'songs', 'restSongs' }) do
+        for _, n in ipairs(list(S[k])) do used[n] = true end
+    end
+    for _, n in ipairs({ S.petSpell, S.pullSpell }) do used[n] = true end
+    return used
+end
+
+-- healers (Heal duty on): keep the two best single-target direct heals and the two best heals-over-time (not
+-- self-only wards) from the book memorized, each from a different line (a shared recast timer, or the same kind,
+-- target, recast and cast time). The gem taken: an empty one, a spell too untrained to cast, a nuke / DoT whose duty
+-- is off, a self buff (those get cast by borrowing a gem), a leftover under half my level nothing uses, and only
+-- then a nuke. Checked on start and level-up
+local function memHeals()
+    local lvl = mq.TLO.Me.Level() or 0
+    if not S.autoMem or not S.heal or not HEALER[mq.TLO.Me.Class.ShortName() or ''] or R.healMemLevel == lvl then return false end
+    local direct, hot = {}, {}
+    for i = 1, 1120 do
+        local b = mq.TLO.Me.Book(i)
+        if b() and (b.Level() or 0) <= lvl and b.Category() == 'Heals' and b.SpellType() == 'Beneficial' and not blocked(b.Name()) and trained(b) then
+            local sub, tt, timer = b.Subcategory() or '', b.TargetType() or '', b.RecastTimerID() or 0
+            local e = { name = b.Name(), lvl = b.Level() or 0, line = timer > 0 and ('t' .. timer)
+                or string.format('%s|%s|%d|%d', sub, tt, b.RecastTime() or 0, math.floor((b.MyCastTime() or 0) / 500)) }
+            if sub == 'Duration Heals' and tt ~= 'Self' then table.insert(hot, e)
+            elseif (sub == 'Heals' or sub == 'Quick Heal') and tt == 'Single' then table.insert(direct, e) end
+        end
+    end
+    local want, wantSet = {}, {}
+    for _, l in ipairs({ direct, hot }) do
+        table.sort(l, function(a, b) return a.lvl > b.lvl end)
+        local seen, n = {}, 0
+        for _, e in ipairs(l) do
+            if n < 2 and not seen[e.line] then seen[e.line] = true; n = n + 1; table.insert(want, e.name); wantSet[e.name] = true end
+        end
+    end
+    local missing
+    for _, n in ipairs(want) do if not mq.TLO.Me.Gem(n)() then missing = n; break end end
+    if not missing then R.healMemLevel = lvl; return false end
+    local used, isBuff, isNuke, isDot = usedSpells(), {}, {}, {}
+    for _, n in ipairs(list(S.buffs)) do isBuff[n] = true end
+    for _, n in ipairs(list(S.nukes)) do isNuke[n] = true end
+    for _, n in ipairs(list(S.dots)) do isDot[n] = true end
+    local slot, slotPrio
+    for i = 1, (mq.TLO.Me.NumGems() or 8) do
+        local g = mq.TLO.Me.Gem(i)
+        local n = g() and g.Name() or ''
+        local prio
+        if n == '' then prio = 0
+        elseif wantSet[n] or (S.mode == 'Hunter' and n == S.pullSpell) then prio = nil
+        elseif not trained(g) then prio = 1
+        elseif (isNuke[n] and not S.nuke) or (isDot[n] and not S.dot) then prio = 2
+        elseif isBuff[n] then prio = 3
+        elseif not used[n] and (g.Level() or 0) < lvl / 2 then prio = 4
+        elseif isNuke[n] then prio = 5 end
+        if prio and (not slotPrio or prio < slotPrio) then slot, slotPrio = i, prio end
+    end
+    if not slot then log('no gem to spare for %s', missing); R.healMemLevel = lvl; return false end
+    local over = mq.TLO.Me.Gem(slot).Name()
+    log('memorizing %s (heal) in gem %d%s', missing, slot, over and (' over ' .. over) or '')
+    mq.cmdf('/memspell %d "%s"', slot, missing)
+    mq.delay(20000, function() return mq.TLO.Me.Gem(slot).Name() == missing or not quiet() end)
+    if mq.TLO.Me.Gem(slot).Name() ~= missing and quiet() then backoff(missing, 'memorize', 600000) end
+    return true
+end
+
+local function memRestSongs()
+    local lvl = mq.TLO.Me.Level() or 0
+    if not S.autoMem or mq.TLO.Me.Class.ShortName() ~= 'BRD' or R.restSongLevel == lvl then return false end
+    R.restSongLevel = lvl
+    local best
+    for i = 1, 1120 do
+        local b = mq.TLO.Me.Book(i)
+        if b() and (b.Level() or 0) <= lvl and REGENSONG(b) and b.TargetType() ~= 'Self' and (not best or b.Level() > best.lvl) then
+            best = { name = b.Name(), lvl = b.Level() or 0 }
+        end
+    end
+    if not best or mq.TLO.Me.Gem(best.name)() then return false end
+    local used = usedSpells()
+    for i = 1, (mq.TLO.Me.NumGems() or 8) do
+        local g = mq.TLO.Me.Gem(i)
+        if not g() or not used[g.Name()] then
+            log('memorizing %s (L%d, rest song) in gem %d%s', best.name, best.lvl, i, g() and (' over ' .. g.Name()) or '')
+            mq.cmdf('/memspell %d "%s"', i, best.name)
+            mq.delay(20000, function() return mq.TLO.Me.Gem(i).Name() == best.name or not quiet() end)
+            return true
+        end
+    end
+    log('no free gem for rest song %s', best.name)
     return false
 end
 
@@ -674,38 +1568,344 @@ local function restoreGem()
     if s.name == '' or mq.TLO.Me.Gem(s.g).Name() == s.name then R.swapGem = nil; return false end
     log('putting %s back in gem %d', s.name, s.g)
     mq.cmdf('/memspell %d "%s"', s.g, s.name)
-    mq.delay(20000, function() return mq.TLO.Me.Gem(s.g).Name() == s.name or #hostiles() > 0 end)
+    mq.delay(20000, function() return mq.TLO.Me.Gem(s.g).Name() == s.name or not quiet() end)
     if mq.TLO.Me.Gem(s.g).Name() == s.name then R.swapGem = nil end
     return true
 end
 
+-- cast buff b on id (group spells on myself), memorizing it into a borrowed gem first if needed.
+-- true when it did something; the same buff on the same target is retried after a minute at most
+local function tryBuff(b, id, why)
+    local key = id .. '|' .. b
+    if mq.gettime() - (R.buffTry[key] or 0) < 60000 then return false end
+    if spellReady(b) then
+        R.buffTry[key] = mq.gettime()
+        local tt = mq.TLO.Spell(b).TargetType() or ''
+        castOn(b, tt:find('^Group') and myId() or id, why)
+        return true
+    end
+    local swap = R.swapGem
+    if swap and mq.TLO.Me.Gem(swap.g).Name() == b then
+        if mq.gettime() - (swap.at or 0) < 15000 then return true end   -- gem still refreshing
+        backoff(b, 'not ready after memorizing', 120000)
+    elseif not mq.TLO.Me.Gem(b)() and S.memBuffs and mq.TLO.Me.Book(b)() and quiet() then
+        if not swap then
+            local g = mq.TLO.Me.NumGems() or 8
+            for i = 1, g do if not mq.TLO.Me.Gem(i)() then g = i; break end end
+            swap = { g = g, name = mq.TLO.Me.Gem(g).Name() or '' }
+            R.swapGem = swap
+        end
+        log('memorizing %s in gem %d to buff', b, swap.g)
+        mq.cmdf('/memspell %d "%s"', swap.g, b)
+        mq.delay(20000, function() return mq.TLO.Me.Gem(swap.g).Name() == b or not quiet() end)
+        swap.at = mq.gettime()
+        if mq.TLO.Me.Gem(swap.g).Name() ~= b then backoff(b, 'memorize', 60000) end
+        return true
+    end
+    return false
+end
+
 local function doBuffs()
     if (mq.TLO.Me.Level() or 0) ~= R.buffLevel then refreshBuffs() end
-    for _, b in ipairs(list(S.buffs)) do
+    local buffs = list(S.buffs)
+    local function usable(b)
         local sp = mq.TLO.Spell(b)
-        if sp() and not mq.TLO.Me.Buff(b)() and sp.Stacks() and not blocked(b) and (mq.TLO.Me.CurrentMana() or 0) >= (sp.Mana() or 0) then
-            if spellReady(b) then castOn(b, myId(), 'buff'); return true end
-            local swap = R.swapGem
-            if swap and mq.TLO.Me.Gem(swap.g).Name() == b then
-                if mq.gettime() - (swap.at or 0) < 15000 then return true end   -- gem still refreshing
-                backoff(b, 'not ready after memorizing', 120000)
-            elseif not mq.TLO.Me.Gem(b)() and S.memBuffs and mq.TLO.Me.Book(b)() then
-                if not swap then
-                    local g = mq.TLO.Me.NumGems() or 8
-                    for i = 1, g do if not mq.TLO.Me.Gem(i)() then g = i; break end end
-                    swap = { g = g, name = mq.TLO.Me.Gem(g).Name() or '' }
-                    R.swapGem = swap
+        return sp() and not blocked(b) and (mq.TLO.Me.CurrentMana() or 0) >= (sp.Mana() or 0)
+    end
+    local cls = mq.TLO.Me.Class.ShortName() or ''
+    for _, b in ipairs(buffs) do
+        if usable(b) and wantsBuff(cls, buffWho(b), not ranged()) and not hasBuff(b) and buffStacks(b, false) then
+            if tryBuff(b, myId(), 'buff') then return true end
+        end
+    end
+    -- Buff duty: group members in range, each looked at once a minute
+    if S.buff then
+        for i = 1, (mq.TLO.Group.Members() or 0) do
+            local m = mq.TLO.Group.Member(i)
+            local id = m.ID() or 0
+            if id > 0 and m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse' and (m.Distance() or 999) < 100 and m.LineOfSight()
+                and mq.gettime() - (R.buffChecked[id] or 0) > 60000 then
+                local mcls, want = m.Class.ShortName() or '', {}
+                for _, b in ipairs(buffs) do
+                    if usable(b) and mq.TLO.Spell(b).TargetType() ~= 'Self' and wantsBuff(mcls, buffWho(b), false) then table.insert(want, b) end
                 end
-                log('memorizing %s in gem %d to buff', b, swap.g)
-                mq.cmdf('/memspell %d "%s"', swap.g, b)
-                mq.delay(20000, function() return mq.TLO.Me.Gem(swap.g).Name() == b or #hostiles() > 0 end)
-                swap.at = mq.gettime()
-                if mq.TLO.Me.Gem(swap.g).Name() ~= b then backoff(b, 'memorize', 60000) end
-                return true
+                if #want > 0 and targetId(id) then
+                    mq.delay(1500, function() return mq.TLO.Target.BuffsPopulated() end)
+                    for _, b in ipairs(want) do
+                        if not hasBuff(b, mq.TLO.Target) and buffStacks(b, true) and tryBuff(b, id, 'buff ' .. (m.CleanName() or id)) then return true end
+                    end
+                end
+                R.buffChecked[id] = mq.gettime()
             end
         end
     end
     return restoreGem()
+end
+
+-- pet classes: summon the best pet in the book (mages: water first) and keep the best pet buff of each line
+-- on it (haste, misc, block: 10 min+). A gem is borrowed for any that isn't memorized
+local petBook, doPetCare
+do   -- its tables stay out of the main chunk (LuaJIT allows it 200 locals)
+local PETORDER = { MAG = { 'Sum: Water', 'Sum: Earth', 'Sum: Fire', 'Sum: Air' } }
+local NOTPET = { ['Sum: Swarm'] = true, ['Sum: Familiar'] = true, ['Sum: Bodyguard'] = true }
+local PETBUFF = { ['Pet Haste'] = true, ['Pet Misc Buffs'] = true, Block = true }
+function petBook()
+    local lvl = mq.TLO.Me.Level() or 0
+    if R.petBook and R.petBook.lvl == lvl then return R.petBook end
+    local pb, sum, buffs = { lvl = lvl, buffs = {} }, {}, {}
+    for i = 1, 1120 do
+        local b = mq.TLO.Me.Book(i)
+        if b() and (b.Level() or 0) <= lvl and b.Category() == 'Create Item' and b.Subcategory() == 'Summon Weapon'
+            and (b.Name() or ''):find('^Grant') and b.TargetType() == 'Single' then
+            if not pb.weapon or (b.Level() or 0) > pb.weaponLvl then pb.weapon, pb.weaponLvl = b.Name(), b.Level() or 0 end
+        elseif b() and (b.Level() or 0) <= lvl and b.Category() == 'Pet' then
+            local sub, tt, l = b.Subcategory() or '', b.TargetType() or '', b.Level() or 0
+            if sub:find('^Sum:') and not NOTPET[sub] and tt == 'Self' then
+                if not sum[sub] or l > sum[sub].lvl then sum[sub] = { name = b.Name(), lvl = l } end
+            elseif PETBUFF[sub] and tt == 'Pet' and b.SpellType() == 'Beneficial' and (b.Duration.TotalSeconds() or 0) >= 600 then
+                if not buffs[sub] or l > buffs[sub].lvl then buffs[sub] = { name = b.Name(), lvl = l } end
+            end
+        end
+    end
+    for _, sub in ipairs(PETORDER[mq.TLO.Me.Class.ShortName() or ''] or {}) do
+        if sum[sub] then pb.summon = sum[sub].name; break end
+    end
+    if not pb.summon then
+        local best
+        for _, s in pairs(sum) do if not best or s.lvl > best.lvl then best = s end end
+        pb.summon = best and best.name
+    end
+    for _, s in pairs(buffs) do table.insert(pb.buffs, s.name) end
+    R.petBook = pb
+    if pb.summon then log('pet: %s%s', pb.summon, #pb.buffs > 0 and (', buffs ' .. table.concat(pb.buffs, ', ')) or '') end
+    return pb
+end
+
+function doPetCare()
+    if not S.usePet then return false end
+    local pb = petBook()
+    local pet = mq.TLO.Me.Pet
+    if (pet.ID() or 0) == 0 then
+        -- the Pet summon setting when it names a real pet, else the book's best
+        local sp = S.petSpell ~= '' and not NOTPET[mq.TLO.Spell(S.petSpell).Subcategory() or ''] and S.petSpell or pb.summon
+        return sp ~= nil and sp ~= '' and tryBuff(sp, myId(), 'summon pet')
+    end
+    for _, b in ipairs(pb.buffs) do
+        if not blocked(b) and not mq.TLO.Pet.Buff(b)() and mq.TLO.Spell(b).StacksPet() and tryBuff(b, pet.ID(), 'pet buff') then return true end
+    end
+    return false
+end
+end
+
+-- mages: two summoned weapons for every unarmed pet in the group (mine and group members'). The grant, cast on me,
+-- gives a folded pack (one left in the bags is used first): it unfolds from a top-level slot into a pouch of weapons,
+-- handed out best first. The pouch is destroyed once it's empty (leftover weapons wait for the next pet)
+local doPetWeapons, petsToArm
+do   -- its helpers stay out of the main chunk (LuaJIT allows it 200 locals)
+local WEAPONPREF = { 'Fireblade', 'Iceblade', 'Ragesword', 'Mindblade', 'Shortsword' }
+local function petWeapons()
+    local found = {}
+    for i = 23, 34 do
+        local b = mq.TLO.Me.Inventory(i)
+        for j = 1, (b() and b.Container() or 0) do
+            local n = b.Item(j)() and b.Item(j).Name() or ''
+            if n:find('^Summoned: ') then
+                for k, w in ipairs(WEAPONPREF) do if n:find(w) then table.insert(found, { name = n, rank = k }); break end end
+            end
+        end
+    end
+    table.sort(found, function(a, b) return a.rank < b.rank end)
+    return found
+end
+
+local function unarmedPets()
+    local out = {}
+    local function add(pt)
+        if pt() and (pt.ID() or 0) > 0 and (pt.Primary() or 0) == 0 and (pt.Distance3D() or 999) < 100 and pt.LineOfSight()
+            and mq.gettime() - (R.armFail[pt.ID()] or -600000) > 600000 then table.insert(out, pt) end
+    end
+    add(mq.TLO.Me.Pet)
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        if m.Present() and not m.OtherZone() then add(m.Pet) end
+    end
+    return out
+end
+
+-- the weapon pouch: a temporary top-level bag named like one a folded pack unfolded into (names are learned),
+-- holding nothing but summoned items
+local function weaponPouch()
+    local names = {}
+    for _, n in ipairs(list(S.pouchNames)) do names[n] = true end
+    for i = 23, 32 do
+        local b = mq.TLO.Me.Inventory(i)
+        if b() and names[b.Name() or ''] and b.NoRent() and (b.Container() or 0) > 0 then
+            local only = true
+            for j = 1, b.Container() do
+                if b.Item(j)() and not (b.Item(j).Name() or ''):find('^Summoned: ') then only = false end
+            end
+            if only then return i, b end
+        end
+    end
+end
+
+-- a mage notices an unarmed pet while idle (checked every 5s), not only after a fight
+function petsToArm()
+    if mq.TLO.Me.Class.ShortName() ~= 'MAG' or not S.usePet or mq.gettime() - R.armCheck < 5000 then return false end
+    R.armCheck = mq.gettime()
+    return quiet() and #unarmedPets() > 0
+end
+
+-- destroy the cursor item only if it's what we expect (a summoned weapon, or the pouch we unfolded)
+local function destroyIf(ok)
+    local n = mq.TLO.Cursor.Name() or ''
+    if n ~= '' and ok(n) then mq.cmd('/destroy'); mq.delay(1500, function() return not mq.TLO.Cursor() end); return true end
+    if mq.TLO.Cursor() then mq.cmd('/autoinventory'); mq.delay(1000) end
+    return false
+end
+
+function doPetWeapons()
+    if mq.TLO.Me.Class.ShortName() ~= 'MAG' or not S.usePet or not quiet() then return false end
+    local cur = mq.TLO.Cursor.Name()
+    if cur then
+        if cur:find('^Folded Pack') then
+            -- unfolding only works from a top-level inventory slot
+            local slot
+            for i = 23, 32 do if not mq.TLO.Me.Inventory(i)() then slot = i; break end end
+            if not slot then
+                log('no free top-level inventory slot to unfold %s', cur); mq.cmd('/autoinventory')
+                if petBook().weapon then backoff(petBook().weapon, 'no free top-level slot', 600000) end
+                return true
+            end
+            mq.cmdf('/itemnotify pack%d leftmouseup', slot - 22)
+            mq.delay(2000, function() return not mq.TLO.Cursor() end)
+            mq.cmdf('/itemnotify pack%d rightmouseup', slot - 22)
+            mq.delay(1500, casting)
+            mq.delay(15000, function() return not casting() end)
+            return true
+        end
+        if (mq.TLO.Cursor.Container() or 0) > 0 then   -- the unfolded pouch
+            if not (', ' .. S.pouchNames .. ','):find(', ' .. cur .. ',', 1, true) then S.pouchNames = S.pouchNames .. ', ' .. cur end
+            mq.cmd('/autoinventory'); return true
+        end
+        if cur:find('^Summoned: ') then mq.cmd('/autoinventory'); return true end
+        return false
+    end
+    local pets, weapons = unarmedPets(), petWeapons()
+    local ps, pouch = weaponPouch()
+    -- an empty pouch goes right away
+    if ps and (pouch.Items() or 0) == 0 then
+        local name = pouch.Name()
+        mq.cmdf('/itemnotify pack%d leftmouseup', ps - 22)
+        mq.delay(2000, function() return mq.TLO.Cursor() ~= nil end)
+        if destroyIf(function(n) return n == name end) then log('pouch empty - destroyed %s', name) end
+        return true
+    end
+    if #pets == 0 then return false end
+    if #weapons < 2 then
+        local g = petBook().weapon
+        if not g or blocked(g) then return false end
+        local slot
+        for i = 23, 32 do if not mq.TLO.Me.Inventory(i)() then slot = i; break end end
+        if not slot then
+            log('no free top-level inventory slot to unfold the pet weapons'); backoff(g, 'no free top-level slot', 600000)
+            return false
+        end
+        -- a folded pack from an earlier grant before casting another
+        local pack = g:gsub('^Grant ', 'Folded Pack of ')
+        if mq.TLO.FindItem('=' .. pack)() then
+            mq.cmdf('/itemnotify "%s" leftmouseup', pack)
+            mq.delay(2000, function() return mq.TLO.Cursor.Name() == pack end)
+            return true
+        end
+        return tryBuff(g, myId(), 'pet weapons')
+    end
+    local pt = pets[1]
+    if (pt.Distance3D() or 999) > 15 then
+        if not mq.TLO.Navigation.Active() then mq.cmdf('/nav id %d distance=8', pt.ID()) end
+        return true
+    end
+    if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+    if not targetId(pt.ID()) then return false end
+    -- two different weapons, best first
+    local pick = { weapons[1].name }
+    for k = 2, #weapons do if weapons[k].name ~= pick[1] then pick[2] = weapons[k].name; break end end
+    pick[2] = pick[2] or weapons[2].name
+    local given = {}
+    for _, w in ipairs(pick) do
+        mq.cmdf('/itemnotify "%s" leftmouseup', w)
+        mq.delay(2000, function() return mq.TLO.Cursor.Name() == w end)
+        if mq.TLO.Cursor.Name() == w then
+            mq.cmd('/click left target')
+            mq.delay(2000, function() return not mq.TLO.Cursor() end)
+            table.insert(given, w)
+        end
+    end
+    if mq.TLO.Window('GiveWnd').Open() then
+        mq.cmd('/notify GiveWnd GVW_Give_Button leftmouseup')
+        mq.delay(3000, function() return not mq.TLO.Window('GiveWnd').Open() end)
+    end
+    mq.delay(1500)
+    if mq.TLO.Cursor() then mq.cmd('/autoinventory') end
+    if (pt.Primary() or 0) == 0 then
+        R.armFail[pt.ID()] = mq.gettime(); log('%s did not take the weapons - trying again in 10 min', pt.CleanName() or '?')
+    else
+        log('armed %s with %s', pt.CleanName() or '?', table.concat(given, ' + '))
+    end
+    return true
+end
+end
+
+-- Rez duty: resurrect group members' corpses in range and sight. In a fight only Call of the Wild, on someone still
+-- dead (back with no exp; an exp rez still works later). Out of combat a rez AA that returns exp, else the best rez
+-- spell in the book (memorized into a borrowed gem if needed) - once per corpse (it stays after the rez)
+local REZAA = { 'Blessing of Resurrection', 'Rejuvenation of Spirit', 'Divine Resurrection' }
+local COMBATREZ = { 'Call of the Wild' }
+local function rezSpell()
+    local lvl = mq.TLO.Me.Level() or 0
+    if R.rezLevel == lvl then return R.rezName end
+    R.rezLevel, R.rezName = lvl, ''
+    local best = 0
+    for i = 1, 1120 do
+        local b = mq.TLO.Me.Book(i)
+        if b() and b.Subcategory() == 'Resurrection' and b.TargetType() == 'Corpse' and (b.Level() or 0) > best then
+            best, R.rezName = b.Level() or 0, b.Name()
+        end
+    end
+    return R.rezName
+end
+
+local function doRez()
+    if not S.rez then return false end
+    local fight = #hostiles() > 0
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        local name = m.Name()
+        local c = name and mq.TLO.Spawn('pccorpse ' .. name .. "'s corpse")
+        if c and c() and not R.rezzed[c.ID()] and (not fight or m.Type() == 'Corpse') and (c.Distance3D() or 999) < 100 and c.LineOfSight() then
+            local key = c.ID() .. '|rez'
+            for _, n in ipairs(fight and COMBATREZ or REZAA) do
+                if mq.TLO.Me.AltAbilityReady(n)() and mq.gettime() - (R.buffTry[key] or 0) > (fight and 10000 or 60000) and targetId(c.ID()) then
+                    R.buffTry[key] = mq.gettime()
+                    if mq.TLO.Me.Sitting() then mq.cmd('/stand'); mq.delay(300) end
+                    mq.cmdf('/alt act %d', mq.TLO.Me.AltAbility(n).ID() or 0)
+                    mq.delay(1000, casting)
+                    if casting() or not mq.TLO.Me.AltAbilityReady(n)() then
+                        log('rez %s (%s)', name, n)
+                        if not fight then R.rezzed[c.ID()] = true end
+                        if casting() then R.cast = { name = n, id = c.ID(), kind = 'heal', resume = function() end } end
+                    end
+                    return true
+                end
+            end
+            local sp = not fight and rezSpell() or ''
+            if sp ~= '' and tryBuff(sp, c.ID(), 'rez ' .. name) then
+                if R.cast and R.cast.id == c.ID() then R.rezzed[c.ID()] = true end
+                return true
+            end
+        end
+    end
+    return false
 end
 
 local function engage(id)
@@ -733,6 +1933,7 @@ end
 -- go after the player's pick: switch to it mid-fight, otherwise engage it (Manual waits until it's on us)
 local function followPick(st)
     if R.pickId == 0 then return false end
+    if S.role ~= 'Tank' or S.mode ~= 'Manual' then R.pickId = 0; return false end
     local t = spawn(R.pickId)
     if not alive(t) then R.pickId = 0; return false end
     if R.targetId == R.pickId and (st == 'APPROACH' or st == 'FIGHT') then return false end
@@ -752,72 +1953,87 @@ local function followPick(st)
     return true
 end
 
--- route safety: MQ2Nav path waypoints vs every NPC near the route -----------------------------
-local function pathPoints(dest)
-    local s = mq.TLO.Navigation.PathPoints(dest)()
-    if not s then return nil end
-    local pts = {}
-    for x, y, z in s:gmatch('(-?%d+),(-?%d+),(-?%d+)') do table.insert(pts, { tonumber(x), tonumber(y), tonumber(z) }) end
-    return #pts > 0 and pts or nil
-end
-
-local function pathLen(pts)
-    local len = 0
-    for k = 1, #pts - 1 do
-        local a, b = pts[k], pts[k + 1]
-        len = len + math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2 + (b[3] - a[3]) ^ 2)
-    end
-    return len
-end
-
--- 2D distance from p to segment ab, and how far along it (0..1) the closest point is
-local function segDist(px, py, ax, ay, bx, by)
-    local dx, dy = bx - ax, by - ay
-    local l2 = dx * dx + dy * dy
-    local f = l2 > 0 and math.max(0, math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) or 0
-    return math.sqrt((px - ax - f * dx) ^ 2 + (py - ay - f * dy) ^ 2), f
-end
-
--- NPCs (not the target) within avoidRadius of the route on the same level
-local function mobsOnRoute(pts, skipId)
-    local hits = {}
-    if not pts or #pts < 2 then return hits end
-    for i = 1, 80 do
-        local n = mq.TLO.NearestSpawn(i, 'npc radius 1500')
-        if not n() then break end
-        if n.ID() ~= skipId and alive(n) and n.ConColor() ~= 'GREY' then
-            local nx, ny, nz = n.X(), n.Y(), n.Z()
-            for k = 1, #pts - 1 do
-                local a, b = pts[k], pts[k + 1]
-                local d, f = segDist(nx, ny, a[1], a[2], b[1], b[2])
-                if d < S.avoidRadius and math.abs(nz - (a[3] + (b[3] - a[3]) * f)) < 25 then
-                    table.insert(hits, { spawn = n, seg = k }); break
-                end
+-- reasons not to pull yet: resurrection sickness (mine or a group member's), a dead or missing member,
+-- a healer or CC class under "Rest below %" mana
+local SICK = { 'Resurrection Sickness', 'Revival Sickness' }
+local HEALCC = { CLR = true, DRU = true, SHM = true, ENC = true, BRD = true }
+local function pullHold(travel)
+    for _, b in ipairs(SICK) do if mq.TLO.Me.Buff(b)() then return 'I have ' .. b end end
+    if hp() < S.restPct then return string.format('I am at %d%% HP', hp()) end
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        local name = m.Name() or '?'
+        if m.OtherZone() then
+            if not travel then return name .. ' is not in the zone' end
+        elseif not m.Present() or m.Type() == 'Corpse' then
+            return name .. ' is dead'
+        else
+            local s = m.Spawn
+            for _, b in ipairs(SICK) do if s() and s.CachedBuff(b)() then return name .. ' has ' .. b end end
+            if HEALCC[m.Class.ShortName() or ''] and (m.PctMana() or 100) < S.restPct then
+                return string.format('%s is at %d%% mana', name, m.PctMana() or 0)
             end
-        end
-    end
-    return hits
-end
-
--- a waypoint beside the first mob on the route, on whichever side has a clear path to it
-local function detourFor(pts, hit)
-    local a, b = pts[hit.seg], pts[hit.seg + 1]
-    local dx, dy = b[1] - a[1], b[2] - a[2]
-    local l = math.sqrt(dx * dx + dy * dy)
-    if l < 1 then return nil end
-    local px, py = -dy / l, dx / l
-    local mx, my = hit.spawn.X(), hit.spawn.Y()
-    for _, mult in ipairs({ 2, 3 }) do
-        for _, side in ipairs({ 1, -1 }) do
-            local wx, wy = mx + side * px * S.avoidRadius * mult, my + side * py * S.avoidRadius * mult
-            local dest = string.format('loc %.0f %.0f %.0f', wy, wx, a[3])
-            local wp = pathPoints(dest)
-            if wp and #mobsOnRoute(wp, 0) == 0 then
-                return { x = wx, y = wy, dest = dest, around = hit.spawn.CleanName() }
-            end
+            if (m.PctHPs() or 100) < S.restPct then return string.format('%s is at %d%% HP', name, m.PctHPs() or 0) end
         end
     end
     return nil
+end
+
+-- the hunt-zone trip waits for the same things (not for members who are elsewhere)
+local function travelHeld()
+    local hold = pullHold(true)
+    if hold and hold ~= R.travelWhy then log('not traveling yet: %s', hold) end
+    R.travelWhy = hold   -- its own field: sharing the pull hold's made both log every tick
+    return hold ~= nil
+end
+
+-- Tank role: make myself the group's main tank and main assist (needs group leader), so Chase and
+-- Assist characters with no name typed in follow / assist me
+local function claimGroupRoles()
+    if S.role ~= 'Tank' or (mq.TLO.Group.Members() or 0) == 0 or mq.gettime() - R.lastRoles < 30000 then return end
+    R.lastRoles = mq.gettime()
+    local me = mq.TLO.Me.CleanName() or ''
+    local tank, assist = mq.TLO.Group.MainTank.Name() == me, mq.TLO.Group.MainAssist.Name() == me
+    if tank and assist then return end
+    if mq.TLO.Group.Leader.Name() ~= me then
+        if not R.rolesWarned then log('Tank: not the group leader - cannot make myself main tank / main assist'); R.rolesWarned = true end
+        return
+    end
+    if not tank then mq.cmdf('/grouproles set %s 1', me) end
+    if not assist then mq.cmdf('/grouproles set %s 2', me) end
+    log('Tank: set myself as group main tank and main assist')
+end
+
+-- a typed name wins; blank = the group's main tank (Chase) or main assist (Assist), never myself
+local function groupLead(typed, role)
+    if typed ~= '' then return typed end
+    local n = (role == 'tank' and mq.TLO.Group.MainTank.Name() or mq.TLO.Group.MainAssist.Name()) or ''
+    return n ~= (mq.TLO.Me.CleanName() or '') and n or ''
+end
+
+-- NPCs listed in the Find Window (quest givers, merchants, bankers...) are never hunted. Read once per zone: the
+-- window is opened if it's closed (that asks the server for the zone's list), read when the list settles, closed again
+local function findable()
+    local zone = mq.TLO.Zone.ShortName() or ''
+    if R.findZone == zone then return R.findNames end
+    local wasOpen = mq.TLO.Window('FindLocationWnd').Open()
+    if not wasOpen then mq.cmd('/windowstate FindLocationWnd open') end
+    local l = mq.TLO.Window('FindLocationWnd').Child('FLW_FindLocationList')
+    local last, since = -1, mq.gettime()
+    mq.delay(4000, function()
+        local c = l.Items() or 0
+        if c ~= last then last, since = c, mq.gettime() end
+        return c > 0 and mq.gettime() - since > 1000
+    end)
+    local names, list_ = {}, {}
+    for i = 1, (l.Items() or 0) do
+        local cat, name = l.List(i, 1)() or '', l.List(i, 2)() or ''
+        if name ~= '' and cat ~= '(Group)' and cat ~= 'Zone Connection' then names[name:lower()] = true; table.insert(list_, name) end
+    end
+    if not wasOpen then mq.cmd('/windowstate FindLocationWnd close') end
+    R.findZone, R.findNames = zone, names
+    log('not hunting Find Window NPCs in %s: %s', zone, #list_ > 0 and table.concat(list_, ', ') or 'none listed')
+    return names
 end
 
 local function pickTarget()
@@ -831,54 +2047,254 @@ local function pickTarget()
         return nil
     elseif S.mode == 'Hunter' then
         if R.kills >= S.kills then stopAll(string.format('done: %d kills', R.kills)); return nil end
+        -- a mob already on the extended target list (on its way, or beyond hostiles() range): go for the nearest
+        -- one; never pull another while any is listed (an unreachable one just means waiting)
+        local listed, near, nd = false, nil, nil
+        for i = 1, (mq.TLO.Me.XTarget() or 0) do
+            local x = mq.TLO.Me.XTarget(i)
+            if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' and alive(spawn(x.ID())) then
+                listed = true
+                local d = x.Distance3D() or 9999
+                if (R.skip[x.ID()] or 0) < mq.gettime() and (not nd or d < nd) then near, nd = x.ID(), d end
+            end
+        end
+        if near then return near end
+        if listed then return nil end
+        local hold = pullHold()
+        if hold then
+            if hold ~= R.holdWhy then log('not pulling yet: %s', hold); R.holdWhy = hold end
+            return nil
+        end
+        if R.holdWhy then log('group ready - pulling again'); R.holdWhy = nil end
+        -- route checks cost: look for a new pull at most every 1.5s
+        if mq.gettime() - R.lastHunt < 1500 then return nil end
+        R.lastHunt = mq.gettime()
         local q = string.format('npc range %d %d radius %d noalert 1 targetable', S.minlvl, S.maxlvl, S.radius)
-        -- shortest safe walk among the 10 nearest reachable candidates: each mob near the route costs 400 units.
-        -- NearestSpawn is 2D, so the nearest can be floors away with no path; skip those and look further
-        local best, bestScore, bestPts, bestHits, found = nil, nil, nil, nil, 0
-        for i = 1, 50 do
+        -- every mob in level range within the pull radius, by walking distance (NearestSpawn is 2D, so check the
+        -- path): the one with the fewest other NPCs within avoidRadius of it (alone first), then the closest
+        local best, bestKey
+        local npcs = findable()
+        for i = 1, math.min(mq.TLO.SpawnCount(q)() or 0, 40) do
             local s = mq.TLO.NearestSpawn(i, q)
-            if not s() or found >= 10 then break end
+            if not s() then break end
             local id = s.ID()
-            if (R.skip[id] or 0) < mq.gettime() then
-                -- route checks need MQ2Nav's PathPoints member; without it, rank by path length only
-                local pts = pathPoints('id ' .. id)
-                local len = pts and pathLen(pts) or mq.TLO.Navigation.PathLength('id ' .. id)() or -1
-                if len < 0 then len = nil; R.skip[id] = mq.gettime() + 30000 end   -- off the navmesh
-                if len and len < S.radius * 1.5 then
-                    found = found + 1
-                    local hits = S.avoidMobs and mobsOnRoute(pts, id) or {}
-                    local score = len + #hits * 400
-                    if not bestScore or score < bestScore then best, bestScore, bestPts, bestHits = id, score, pts, hits end
+            if (R.skip[id] or 0) < mq.gettime() and not npcs[(s.CleanName() or ''):lower()] then
+                local len = mq.TLO.Navigation.PathLength('id ' .. id)() or -1
+                if len < 0 then R.skip[id] = mq.gettime() + 30000                     -- off the navmesh
+                elseif len <= S.radius then
+                    local near = (mq.TLO.SpawnCount(string.format('npc loc %.0f %.0f %.0f radius %d zradius 40',
+                        s.X(), s.Y(), s.Z(), S.avoidRadius))() or 1) - 1
+                    local key = near * 1e6 + len
+                    if not bestKey or key < bestKey then best, bestKey = { id = id, len = len, near = near, name = s.CleanName() }, key end
                 end
             end
         end
-        if best and #bestHits > 0 then
-            R.pendingDetour = detourFor(bestPts, bestHits[1])
-            if not R.pendingDetour then log('no clear route: %d mob(s) near the path', #bestHits) end
+        if not best then
+            if mq.gettime() - R.noRouteAt > 30000 then log('no mobs to pull within %d', S.radius); R.noRouteAt = mq.gettime() end
+            return nil
         end
-        R.pullCandidate = best ~= nil
-        return best
+        log('closest pull: %s, %.0f away, %s', best.name or '?', best.len, best.near == 0 and 'alone' or (best.near .. ' other(s) next to it'))
+        R.pullCandidate = true
+        return best.id
     else
-        local who = S.mode == 'Assist' and S.assistName or S.chaseName
+        local who = S.mode == 'Assist' and groupLead(S.assistName, 'assist') or groupLead(S.chaseName, 'tank')
         if who == '' then return nil end
-        if mq.gettime() - R.lastAssist > 1500 then mq.cmdf('/assist %s', who); R.lastAssist = mq.gettime(); mq.delay(300) end
-        local t = mq.TLO.Target
+        local t
+        if (S.mode == 'Assist' and S.assistName or S.chaseName) == '' then
+            -- the group main assist's target, shared by the game: no /assist (it can switch auto-attack on)
+            t = mq.TLO.Me.GroupAssistTarget
+        else
+            if mq.gettime() - R.lastAssist > 1500 then mq.cmdf('/assist %s', who); R.lastAssist = mq.gettime(); mq.delay(300) end
+            t = mq.TLO.Target
+        end
         if t() and t.Type() == 'NPC' and (t.PctHPs() or 100) <= S.assistAt then return t.ID() end
+        if mq.TLO.Me.Combat() then attackOff() end   -- "attack on assist" before we mean to fight
         return nil
     end
 end
 
+mq.event('axpCannotCast', 'You cannot cast #1# on #2#.', function(_, _, who)
+    local t = spawn(R.targetId ~= 0 and R.targetId or R.pickId)
+    if alive(t) and t.Type() == 'NPC' and t.CleanName() == who and (R.state == 'APPROACH' or R.state == 'FIGHT') then
+        log('%s cannot be attacked - skipping it', who)
+        R.skip[t.ID()] = mq.gettime() + 600000; R.targetId, R.pickId = 0, 0
+        mq.cmd('/nav stop'); attackOff(); setState('FIND')
+    end
+end)
+
+local function healNeeded()
+    if not S.heal then return false end
+    if hp() < S.emergencyPct and #abilitiesFor('Emergency') > 0 then return true end
+    if not hurt() then return false end
+    for _, h in ipairs(list(S.healSpells)) do if gemUp(h) then return true end end
+    for _, a in ipairs(abilitiesFor('Heal')) do if abilityReady(a) then return true end end
+    return false
+end
+
+local function ccNeeded()
+    if not S.cc or hp() < 40 then return false end
+    local range = 0
+    for _, m in ipairs(list(S.mez)) do
+        if gemUp(m) then
+            local sp = mq.TLO.Spell(m)
+            range = math.max(range, sp.TargetType() == 'Single' and (sp.MyRange() or sp.Range() or 0) or (sp.AERange() or 0))
+        end
+    end
+    if range == 0 then return false end
+    local adds = hostiles()
+    if #adds < 2 then return false end
+    local tank = mq.TLO.Me.GroupAssistTarget.ID() or 0
+    for _, x in ipairs(adds) do
+        if x.ID() ~= R.targetId and x.ID() ~= tank and not mezzed(x) and x.LineOfSight() and (x.Distance3D() or 999) <= range then
+            return true
+        end
+    end
+    return false
+end
+
+-- CC from any state (a Chase bard waiting on the assist target too), right after heals: an add that needs a mez
+-- gets it now - a song ducked for it isn't followed by another song
+local function doMez() return ccNeeded() and doCC(spawn(R.targetId)) end
+
+-- the cast in progress: true while we wait for it. A cast that isn't a heal is stopped for a heal someone
+-- needs now, one that isn't a heal or CC for an add that needs mezzing; one about to land always finishes,
+-- and after a duck the next one waits 4s (so an unreachable heal target can't stop every cast)
+local function watchCast()
+    local c = R.cast
+    if not c then return casting() end
+    if not casting() then
+        R.cast = nil; c.resume()
+        if c.id ~= R.targetId then restoreFight() end
+        return false
+    end
+    if c.kind == 'heal' or (tonumber(mq.TLO.Me.CastTimeLeft()) or 1000) < 500 or mq.gettime() - R.duckAt < 4000 then return true end
+    local need = (healNeeded() and 'heal') or (c.kind ~= 'cc' and ccNeeded() and 'mez') or nil
+    if not need then return true end
+    log('ducking %s for a %s', c.name, need)
+    mq.cmd(mq.TLO.Me.Class.ShortName() == 'BRD' and '/stopsong' or '/stopcast')
+    mq.delay(500, function() return not casting() end)
+    R.cast, R.duckAt = nil, mq.gettime()
+    c.resume()
+    return false
+end
+
+-- the spawn Chase follows / Assist assists
+local function leadSpawn()
+    local who = S.mode == 'Assist' and groupLead(S.assistName, 'assist') or groupLead(S.chaseName, 'tank')
+    local c = who ~= '' and mq.TLO.Spawn('=' .. who) or nil
+    return c and c() and c.Type() ~= 'Corpse' and c or nil
+end
+
+-- Chase: walk to within half the chase distance of the leader once they're further than it
+local function chaseFollow()
+    if S.mode ~= 'Chase' then return end
+    local c = leadSpawn()
+    if c and (c.Distance() or 0) > S.chaseDist and not mq.TLO.Navigation.Active() then
+        mq.cmdf('/nav id %d distance=%d', c.ID(), math.max(10, math.floor(S.chaseDist / 2)))
+    end
+end
+
 -- one tick of the state machine -----------------------------------------------------------
+-- the FIGHT state, split out of step() (LuaJIT allows a function 60 upvalues)
+local function fightTick()
+    local t = spawn(R.targetId)
+    if not alive(t) and (mq.TLO.Zone.ShortName() or '') ~= R.fightZone then
+        log('left %s mid-fight - lost %s', R.fightZone, R.targetName)
+        attackOff(); mq.cmd('/stick off'); petBackOff(); R.targetId = 0; setState('FIND')
+        return
+    end
+    if not alive(t) then
+        local nextT = bestTarget()
+        R.kills = R.kills + 1
+        log('killed %s in %.1fs (kills %d)', R.targetName, inState() / 1000, R.kills)
+        DPS.kill(inState() / 1000)
+        if nextT then
+            R.targetId, R.targetName, R.opened = nextT.ID(), nextT.CleanName(), false
+            log('next add: %s (%s)', R.targetName, nextT.Class.ShortName() or '?')
+            attackOn(); closeIn(nextT); setState('FIGHT'); return
+        end
+        attackOff(); mq.cmd('/stick off'); petBackOff(); R.targetId = 0
+        setState((S.mode == 'Hunter' and (hp() < S.restPct or manaLow())) and 'REST' or 'BUFF')
+        return
+    end
+    if doRez() then return end
+    if (mq.TLO.Target.ID() or 0) ~= R.targetId or not R.attacking then restoreFight() end
+    if hp() < 12 and S.mode == 'Hunter' and (mq.TLO.Group.Members() or 0) == 0 then stopAll('HP critical'); return end
+    for _, b in ipairs(list(S.combatBuffs)) do
+        if not mq.TLO.Me.Buff(b)() and not mq.TLO.Me.Song(b)() and spellReady(b) then if castOn(b, myId(), 'combat buff') then return end end
+    end
+    if not ranged() and mq.gettime() < R.holdUntil then
+        if reachable(t, 35) then
+            R.holdUntil = 0; mq.cmd('/attack on'); stick()
+        else
+            if mq.gettime() - R.lastFace > 1000 then mq.cmdf('/face fast id %d', t.ID()); R.lastFace = mq.gettime() end
+            return
+        end
+    end
+    if archer() then
+        -- keep facing it (auto-fire only shoots what's in front) and keep auto-fire on once it's in range
+        if mq.gettime() - R.lastFace > 1500 then mq.cmdf('/face fast id %d', t.ID()); R.lastFace = mq.gettime() end
+        if not mq.TLO.Me.AutoFire() and reachable(t, S.castRange) then mq.cmd('/autofire') end
+        -- in range: hold ARCHERY units off it, backing up when it comes closer (MoveUtils moveback)
+        if reachable(t, S.castRange) and not mq.TLO.Navigation.Active()
+            and (not mq.TLO.Stick.Active() or mq.gettime() - R.tooCloseAt < 1000) then
+            R.tooCloseAt = 0
+            mq.cmdf('/stick id %d %d moveback', t.ID(), ARCHERY)
+        elseif not reachable(t, S.castRange) and mq.TLO.Stick.Active() then
+            mq.cmd('/stick off')
+        end
+    end
+    if ranged() then
+        -- stay in casting range with line of sight
+        local far = not reachable(t, S.castRange)
+        if far and not mq.TLO.Navigation.Active() and mq.gettime() - R.lastNav > 3000 then navTo(t.ID())
+        elseif not far and mq.TLO.Navigation.Active() and reachable(t, S.castRange * 0.8) then mq.cmd('/nav stop') end
+    end
+    if not ranged() then
+        -- out of reach (too far, another floor or behind a wall): path to it; stick only once it's in sight
+        if not reachable(t, 35) then
+            if not mq.TLO.Navigation.Active() and mq.gettime() - R.lastNav > 3000 then mq.cmd('/stick off'); navTo(t.ID()) end
+        elseif mq.TLO.Navigation.Active() then mq.cmd('/nav stop'); stick()
+        elseif not mq.TLO.Stick.Active() then stick() end
+        if reachable(t, 35) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+    end
+    doPet(t)
+    if keepMobsInFront(t) then return end
+    if doTank(t) then return end
+    if doShed(t) then return end
+    if doDuties(t) then return end
+    if doBurn(t) then return end
+    if doDps(t) then return end
+    if inState() > 300000 then log('fight timeout'); attackOff(); R.pickId = 0; setState('FIND') end
+end
+
 local function step()
+    -- dead: drop the fight and wait for a rez (or a respawn), then start over from BUFF
+    if mq.TLO.Me.State() == 'HOVER' or mq.TLO.Me.Dead() then
+        if not R.dead then R.dead = true; R.targetId, R.pickId, R.cast = 0, 0, nil; setState('BUFF'); log('died - waiting for a rez') end
+        return
+    end
+    if R.dead then R.dead = false; log('alive again') end
     noticePick()
-    if casting() then return end
+    if watchCast() then return end
+    claimGroupRoles()
+    if R.feignAt > 0 and mq.gettime() - R.feignAt > 3000 then
+        R.feignAt = 0
+        if mq.TLO.Me.Feigning() then mq.cmd('/stand'); mq.delay(300); restoreFight() end
+    end
+    -- heals, then a mez, then (out of a fight) songs: a song ducked for a mez isn't restarted before the mez
     if doHeal() then return end
+    if doMez() then return end
+    if doMalo() then return end
+    if R.state ~= 'FIGHT' and R.state ~= 'REST' and doSongs() then return end
+    if doDefense() then return end
     local st = R.state
     if followPick(st) then return end
     local here = mq.TLO.Zone.ShortName() or ''
 
     -- hunt zone changed while running: leave once we're not fighting
-    if S.mode == 'Hunter' and S.travel and here ~= S.zone and st ~= 'TRAVEL' and st ~= 'FIGHT' and R.pickId == 0 and #hostiles() == 0 then
+    if S.mode == 'Hunter' and S.travel and here ~= S.zone and st ~= 'TRAVEL' and st ~= 'FIGHT' and R.pickId == 0 and #hostiles() == 0
+        and not travelHeld() then
         mq.cmd('/stick off'); mq.cmd('/nav stop'); attackOff(); R.targetId = 0
         mq.cmdf('/travelto %s', S.zone)
         R.travelTarget, R.travelTries, R.lastMoveAt = S.zone, 0, mq.gettime()
@@ -889,6 +2305,7 @@ local function step()
 
     if st == 'TRAVEL' then
         if here == S.zone then log('arrived in %s', S.zone); mq.cmd('/nav reload'); setState('BUFF'); return end
+        if travelHeld() then mq.cmd('/travelto stop'); setState('BUFF'); return end
         if R.travelTarget ~= S.zone then
             log('travel destination changed -> %s', S.zone)
             mq.cmd('/travelto stop'); mq.cmdf('/travelto %s', S.zone)
@@ -909,30 +2326,50 @@ local function step()
 
     elseif st == 'BUFF' then
         if #hostiles() > 0 then setState('FIND'); return end
-        if not R.swapGem then
+        chaseFollow()
+        if not R.swapGem and quiet() then
             if upgradeGems() then return end
             local sig = gemSig()
             if sig ~= S.gemSig then
                 if S.gemSig ~= '' then log('memorized spells changed - refreshing spell lists') end
                 S.gemSig = sig; fillFromGems()
             end
+            if memNukes() then return end
+            if memRestSongs() then return end
+            if memHeals() then return end
         end
-        if S.usePet and S.petSpell ~= '' and (mq.TLO.Me.Pet.ID() or 0) == 0 and spellReady(S.petSpell) then castOn(S.petSpell, myId(), 'summon pet'); return end
+        if doPetCare() then return end
+        if doPetWeapons() then return end
+        if doRez() then return end
+        if doEndurance() then return end
+        if doAbilityBuffs() then return end
         if doBuffs() then return end
         setState('FIND')
 
     elseif st == 'REST' then
         if #hostiles() > 0 then mq.cmd('/stand'); setState('FIND'); return end
-        if hp() >= S.restTo and (mana() >= S.restTo or (mq.TLO.Me.MaxMana() or 0) == 0) then
-            mq.cmd('/stand'); log('rested: HP %d%% mana %d%%', hp(), mana()); setState('BUFF')
+        if doRez() then return end
+        if S.mode == 'Chase' then
+            local lead = leadSpawn()
+            if lead and (lead.Distance() or 0) > S.chaseDist then mq.cmd('/stand'); setState('FIND'); return end
+        end
+        local endu = mq.TLO.Me.PctEndurance() or 100
+        if hp() >= S.restTo and (mana() >= S.restTo or (mq.TLO.Me.MaxMana() or 0) == 0) and endu >= S.restTo then
+            mq.cmd('/stand'); log('rested: HP %d%% mana %d%% endurance %d%%', hp(), mana(), endu); setState('BUFF')
+        elseif doEndurance() then return
         elseif not mq.TLO.Me.Sitting() then mq.cmd('/sit') end
 
     elseif st == 'FIND' then
-        if S.mode == 'Chase' and S.chaseName ~= '' then
-            local c = mq.TLO.Spawn('pc =' .. S.chaseName)
-            if c() and (c.Distance() or 0) > S.chaseDist and not mq.TLO.Navigation.Active() then mq.cmdf('/nav id %d', c.ID()) end
+        if doRez() then return end
+        if doEndurance() then return end
+        if petsToArm() then setState('BUFF'); return end
+        chaseFollow()
+        if #hostiles() == 0 and (hp() < S.restPct or manaLow()) then
+            local lead = S.mode == 'Chase' and leadSpawn() or nil
+            if not lead or (lead.Distance() or 0) <= S.chaseDist then
+                log('medding: HP %d%% mana %d%% endurance %d%%', hp(), mana(), mq.TLO.Me.PctEndurance() or 0); setState('REST'); return
+            end
         end
-        if S.mode == 'Hunter' and #hostiles() == 0 and (hp() < S.restPct or (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < 20) then setState('REST'); return end
         local id = pickTarget()
         if id then engage(id) end
 
@@ -957,7 +2394,7 @@ local function step()
             end
             if not pullReady(R.pull) then
                 R.pullWait = R.pullWait or mq.gettime()
-                if mq.gettime() - R.pullWait > 6000 then log('pull not ready - walking in'); R.pull = nil; navTo(t.ID()) end
+                if mq.gettime() - R.pullWait > (R.pull.how == 'Spell' and 15000 or 6000) then log('pull not ready - walking in'); R.pull = nil; navTo(t.ID()) end
                 return
             end
             if doPull(t) then
@@ -990,101 +2427,8 @@ local function step()
         elseif inState() > 120000 then log('approach timeout'); mq.cmd('/nav stop'); R.pickId = 0; setState('FIND') end
 
     elseif st == 'FIGHT' then
-        local t = spawn(R.targetId)
-        if not alive(t) and (mq.TLO.Zone.ShortName() or '') ~= R.fightZone then
-            log('left %s mid-fight - lost %s', R.fightZone, R.targetName)
-            attackOff(); mq.cmd('/stick off'); petBackOff(); R.targetId = 0; setState('FIND')
-            return
-        end
-        if not alive(t) then
-            local nextT = bestTarget()
-            R.kills = R.kills + 1
-            log('killed %s in %.1fs (kills %d)', R.targetName, inState() / 1000, R.kills)
-            if nextT then
-                R.targetId, R.targetName, R.opened = nextT.ID(), nextT.CleanName(), false
-                log('next add: %s (%s)', R.targetName, nextT.Class.ShortName() or '?')
-                attackOn(); closeIn(nextT); setState('FIGHT'); return
-            end
-            attackOff(); mq.cmd('/stick off'); petBackOff(); R.targetId = 0
-            setState((S.mode == 'Hunter' and (hp() < S.restPct or mana() < 20)) and 'REST' or 'BUFF')
-            return
-        end
-        if (mq.TLO.Target.ID() or 0) ~= R.targetId or not R.attacking then restoreFight() end
-        if hp() < 12 and S.mode == 'Hunter' then stopAll('HP critical'); return end
-        for _, b in ipairs(list(S.combatBuffs)) do
-            if not mq.TLO.Me.Buff(b)() and not mq.TLO.Me.Song(b)() and spellReady(b) then if castOn(b, myId(), 'combat buff') then return end end
-        end
-        if not ranged() and mq.gettime() < R.holdUntil then
-            if reachable(t, 35) then
-                R.holdUntil = 0; mq.cmd('/attack on'); stick()
-            else
-                if mq.gettime() - R.lastFace > 1000 then mq.cmdf('/face fast id %d', t.ID()); R.lastFace = mq.gettime() end
-                return
-            end
-        end
-        if ranged() then
-            -- stay in casting range with line of sight
-            local far = not reachable(t, S.castRange)
-            if far and not mq.TLO.Navigation.Active() and mq.gettime() - R.lastNav > 3000 then navTo(t.ID())
-            elseif not far and mq.TLO.Navigation.Active() and reachable(t, S.castRange * 0.8) then mq.cmd('/nav stop') end
-        end
-        if not ranged() then
-            -- out of reach (too far, another floor or behind a wall): path to it; stick only once it's in sight
-            if not reachable(t, 35) then
-                if not mq.TLO.Navigation.Active() and mq.gettime() - R.lastNav > 3000 then mq.cmd('/stick off'); navTo(t.ID()) end
-            elseif mq.TLO.Navigation.Active() then mq.cmd('/nav stop'); stick()
-            elseif not mq.TLO.Stick.Active() then stick() end
-            if reachable(t, 35) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-        end
-        doPet(t)
-        if keepMobsInFront(t) then return end
-        if doTank(t) then return end
-        if doCC(t) then return end
-        if doDps(t) then return end
-        if inState() > 300000 then log('fight timeout'); attackOff(); R.pickId = 0; setState('FIND') end
+        fightTick()
     end
-end
-
--- ImGui -----------------------------------------------------------------------------------
-local ON, OFF = {0.15, 0.55, 0.2, 1}, {0.3, 0.3, 0.3, 1}
-local STATECOL = { IDLE = {0.7, 0.7, 0.7, 1}, TRAVEL = {0.4, 0.7, 1, 1}, FIGHT = {1, 0.4, 0.4, 1}, REST = {0.5, 1, 0.5, 1} }
-
--- SetTooltip takes a format string; pass text through %s so a literal % can't break it
-local function tip(text) if text and ImGui.IsItemHovered() then ImGui.SetTooltip('%s', text) end end
-
-local function toggle(label, key, help)
-    local c = S[key] and ON or OFF
-    ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
-    if ImGui.Button(label, 70, 26) then S[key] = not S[key]; log('%s %s', label, S[key] and 'ON' or 'OFF') end
-    ImGui.PopStyleColor()
-    if help then tip(help) end
-end
-
-local ROLEHELP = {
-    Tank = 'Tank: melee from the front, taunt when aggro slips, pick targets casters > healers > hybrids > melee,\nstun opener + stun-lock (Tank stuns), use Tank abilities (Bash, Disarm...), keep all mobs in front of you.',
-    DPS = 'DPS: melee from behind, or cast from range (casters/priests); never taunt or stun-lock.\nUses DPS abilities, slows, DoTs and nukes; the pet joins the fight.',
-}
-local function roleButton(r)
-    local c = (S.role == r) and ON or OFF
-    ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
-    if ImGui.Button(r, 70, 26) and S.role ~= r then S.role = r; log('role %s', r) end
-    ImGui.PopStyleColor()
-    tip(ROLEHELP[r])
-end
-
-local function bar(frac, label) ImGui.ProgressBar(math.max(0, math.min(1, frac)), -1, 0, label) end
-
-local function combo(label, cur, items)
-    local out = cur
-    if ImGui.BeginCombo(label, cur) then
-        for _, it in ipairs(items) do
-            local a, b = ImGui.Selectable(it, cur == it)
-            local clicked = b; if clicked == nil then clicked = a end
-            if clicked and cur ~= it then out = it end
-        end
-        ImGui.EndCombo()
-    end
-    return out
 end
 
 -- missing spells: base-rank class spells at/below my level that are not in the spell book or combat abilities
@@ -1158,7 +2502,433 @@ local function setPaused(p)
     log(p and 'paused' or 'resumed')
 end
 
-local function draw()
+-- DPS ---------------------------------------------------------------------------------------
+-- My damage, read from the chat: my hits and spells ("You ... for N points of"), damage shields ("by YOUR"), my pet
+-- and swarm pets ("<pet> ...", "<Me>`s pet ..."), DoT ticks ("has taken N damage from X by <Me>" / "from your X").
+-- A fight runs from the first hit until 8s without one; its DPS is its damage over that time. Session numbers count
+-- from load (or the HUD's Reset stats)
+do
+    local D
+    local function fresh()
+        D = { since = mq.gettime(), xp0 = totalXp(), aa0 = (mq.TLO.Me.AAPointsTotal() or 0) * 100 + (mq.TLO.Me.PctAAExp() or 0),
+            total = 0, by = { melee = 0, spell = 0, dot = 0, pet = 0, ds = 0 }, combatMs = 0, fightStart = nil, fightLast = 0,
+            fightDmg = 0, lastFight = 0, recent = {}, top = 0, topBy = '', kills = 0, killMs = 0 }
+    end
+    fresh()
+
+    local function endFight()
+        local dur = math.max(1000, D.fightLast - D.fightStart)
+        D.combatMs, D.lastFight, D.fightStart = D.combatMs + dur, D.fightDmg * 1000 / dur, nil
+    end
+
+    local function add(kind, n, what)
+        local now = mq.gettime()
+        if D.fightStart and now - D.fightLast > 8000 then endFight() end
+        if not D.fightStart then D.fightStart, D.fightDmg = now, 0 end
+        D.fightLast, D.fightDmg, D.total = now, D.fightDmg + n, D.total + n
+        D.by[kind] = D.by[kind] + n
+        table.insert(D.recent, { now, n })
+        if n > D.top then D.top, D.topBy = n, what end
+    end
+
+    mq.event('axpDmgHit', '#*# for #1# points of #*#', function(line, amount)
+        local n = tonumber(amount)
+        if not n or n <= 0 then return end
+        if line:find('^You ') then
+            local spell = line:match(' damage by (.+)$')
+            if spell then spell = spell:gsub('%s*%(.-%)$', ''):gsub('%.$', '') end
+            add(spell and 'spell' or 'melee', n, spell or 'melee')
+        elseif line:find(' by YOUR ', 1, true) then
+            add('ds', n, 'damage shield')
+        else
+            local pet = mq.TLO.Me.Pet.CleanName() or ''
+            if (pet ~= '' and line:sub(1, #pet + 1) == pet .. ' ') or line:sub(1, #ME + 2) == ME .. '`s' then add('pet', n, 'pet') end
+        end
+    end)
+    mq.event('axpDmgDot', '#*# has taken #1# damage #2#', function(_, amount, rest)
+        local n = tonumber(amount)
+        if not n or n <= 0 then return end
+        local spell = rest:match('^from your (.+)%.') or rest:match('^from (.+) by ' .. ME .. '%.')
+        if spell then add('dot', n, spell) end
+    end)
+
+    function DPS.tick()
+        local now = mq.gettime()
+        if D.fightStart and now - D.fightLast > 8000 then endFight() end
+        while D.recent[1] and now - D.recent[1][1] > 10000 do table.remove(D.recent, 1) end
+    end
+    function DPS.kill(secs) D.kills, D.killMs = D.kills + 1, D.killMs + secs * 1000 end
+    function DPS.reset() fresh(); log('stats reset') end
+
+    function DPS.fmt(n)
+        n = n or 0
+        if n >= 1e9 then return string.format('%.2fB', n / 1e9) elseif n >= 1e6 then return string.format('%.2fM', n / 1e6)
+        elseif n >= 1e4 then return string.format('%.1fk', n / 1e3) end
+        return tostring(math.floor(n + 0.5))
+    end
+
+    -- now: the last 10s of this fight; fight: this fight so far; last: the last fight; avg: per second of fighting
+    function DPS.stats()
+        local now = mq.gettime()
+        local s = { now = 0, fight = 0, last = D.lastFight, total = D.total, by = D.by, top = D.top, topBy = D.topBy,
+            kills = D.kills, killAvg = D.kills > 0 and D.killMs / D.kills / 1000 or 0, fighting = D.fightStart ~= nil,
+            session = now - D.since }
+        local combat = D.combatMs
+        if D.fightStart then
+            local el = math.max(1000, now - D.fightStart)
+            local sum = 0
+            for _, r in ipairs(D.recent) do sum = sum + r[2] end
+            s.fight, s.now, combat = D.fightDmg * 1000 / el, sum * 1000 / math.min(10000, el), combat + el
+        end
+        s.avg = combat > 0 and D.total * 1000 / combat or 0
+        s.hrs = s.session / 3600000
+        s.xph = s.hrs > 0.02 and (totalXp() - D.xp0) / s.hrs or 0
+        s.aaph = s.hrs > 0.02 and ((mq.TLO.Me.AAPointsTotal() or 0) * 100 + (mq.TLO.Me.PctAAExp() or 0) - D.aa0) / 100 / s.hrs or 0
+        return s
+    end
+
+    -- ${AutoXP[dps]}: total|melee|spell|dot|pet|ds|top|top by|last fight DPS
+    function DPS.line()
+        return table.concat({ D.total, D.by.melee, D.by.spell, D.by.dot, D.by.pet, D.by.ds, D.top, D.topBy, math.floor(D.lastFight) }, '|')
+    end
+end
+
+local draw, peersTick
+do   -- the UI helpers stay out of the main chunk (LuaJIT allows it 200 locals)
+-- ImGui -----------------------------------------------------------------------------------
+local ON, OFF = {0.15, 0.55, 0.2, 1}, {0.3, 0.3, 0.3, 1}
+local STATECOL = { IDLE = {0.7, 0.7, 0.7, 1}, TRAVEL = {0.4, 0.7, 1, 1}, FIGHT = {1, 0.4, 0.4, 1}, REST = {0.5, 1, 0.5, 1} }
+
+-- SetTooltip takes a format string; pass text through %s so a literal % can't break it
+local function tip(text) if text and ImGui.IsItemHovered() then ImGui.SetTooltip('%s', text) end end
+
+local function toggle(label, key, help)
+    local c = S[key] and ON or OFF
+    ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
+    if ImGui.Button(label, 70, 26) then S[key] = not S[key]; log('%s %s', label, S[key] and 'ON' or 'OFF') end
+    ImGui.PopStyleColor()
+    if help then tip(help) end
+end
+
+local ROLEHELP = {
+    Tank = 'Tank: melee from the front, taunt when aggro slips, pick targets casters > healers > hybrids > melee,\nstun opener + stun-lock (Tank stuns), use Tank abilities (Bash, Disarm...), keep all mobs in front of you.',
+    DPS = 'DPS: melee from behind, or cast from range (casters/priests); never taunt or stun-lock.\nUses DPS abilities, DoTs and nukes (DoT / Nuke duties; damage stuns and undead nukes count as nukes); the pet joins the fight.',
+}
+local function roleButton(r)
+    local c = (S.role == r) and ON or OFF
+    ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
+    if ImGui.Button(r, 70, 26) and S.role ~= r then S.role = r; log('role %s', r) end
+    ImGui.PopStyleColor()
+    tip(ROLEHELP[r])
+end
+
+local function bar(frac, label) ImGui.ProgressBar(math.max(0, math.min(1, frac)), -1, 0, label) end
+
+local function combo(label, cur, items)
+    local out = cur
+    if ImGui.BeginCombo(label, cur) then
+        for _, it in ipairs(items) do
+            local a, b = ImGui.Selectable(it, cur == it)
+            local clicked = b; if clicked == nil then clicked = a end
+            if clicked and cur ~= it then out = it end
+        end
+        ImGui.EndCombo()
+    end
+    return out
+end
+
+-- Group window ------------------------------------------------------------------------------
+-- Every AutoXP publishes its character's status as the ${AutoXP} TLO: one '|'-separated string, rebuilt once a
+-- second. The group window watches each DanNet peer's ${AutoXP} with a single observer (DanNet re-reads it at most
+-- once a second and sends it only when it changed; a 5s heartbeat field tells a quiet peer from a gone one)
+local drawPeers
+do
+    local FIELDS = { 'beat', 'cls', 'lvl', 'zone', 'hp', 'mana', 'endu', 'run', 'state', 'mode', 'role', 'duties',
+        'tgt', 'tgtHp', 'haters', 'cast', 'flags', 'pet', 'petHp', 'cures', 'kills', 'xph', 'aaph', 'last', 'dps' }
+    local DUTY = { H = 'Heal', C = 'CC', D = 'Debuff', N = 'Nuke', T = 'DoT', B = 'Buff', R = 'Rez' }
+    local CURE = { P = 'Poison', D = 'Disease', C = 'Curse', X = 'Corruption' }
+    -- FontAwesome glyphs (merged into the ImGui font) and EQ spell icons (A_SpellIcons cells)
+    local FA = { BED = '\xef\x88\xb6', BOLT = '\xef\x83\xa7', MAGIC = '\xef\x83\x90', PAW = '\xef\x86\xb0',
+        FLASK = '\xef\x83\x83', WARN = '\xef\x81\xb1', MAP = '\xef\x81\x81', PLAY = '\xef\x81\x8b',
+        PAUSE = '\xef\x81\x8c', STOP = '\xef\x81\x8d', FEIGN = '\xef\x88\x9b', LOST = '\xef\x84\xa7' }
+    local ICON = { invis = 18, ivu = 33, sick = 154 }   -- Invisibility, Invisibility versus Undead, Resurrection Sickness
+    local P = { status = '', at = 0, readAt = 0, rows = {}, observing = {}, tried = {}, beat = {} }
+    local anim
+
+    local function buildStatus()
+        local me = mq.TLO.Me
+        local flags = ''
+        if me.State() == 'HOVER' or me.Dead() then flags = flags .. 'D' end
+        if me.Sitting() then flags = flags .. 'S' end
+        if me.Invis(1)() then flags = flags .. 'I' end
+        if me.Invis(2)() then flags = flags .. 'U' end
+        if me.Stunned() then flags = flags .. 'Z' end
+        if me.Feigning() then flags = flags .. 'F' end
+        for _, b in ipairs(SICK) do if me.Buff(b)() then flags = flags .. 'R'; break end end
+        local cures = ''
+        for _, c in ipairs({ { 'P', me.CountersPoison() }, { 'D', me.CountersDisease() }, { 'C', me.CountersCurse() }, { 'X', me.CountersCorruption() } }) do
+            if (c[2] or 0) > 0 then cures = cures .. c[1] .. c[2] end
+        end
+        local duties = ''
+        for _, d in ipairs({ { 'H', S.heal }, { 'C', S.cc }, { 'D', S.debuff }, { 'N', S.nuke }, { 'T', S.dot }, { 'B', S.buff }, { 'R', S.rez } }) do
+            if d[2] then duties = duties .. d[1] end
+        end
+        local st = DPS.stats()
+        local t, pet = mq.TLO.Target, me.Pet
+        local hasPet = (pet.ID() or 0) > 0
+        local v = {
+            math.floor(mq.gettime() / 5000) % 100, me.Class.ShortName() or '', me.Level() or 0, mq.TLO.Zone.ShortName() or '',
+            me.PctHPs() or 0, (me.MaxMana() or 0) > 0 and (me.PctMana() or 0) or -1,
+            (me.MaxEndurance() or 0) > 0 and (me.PctEndurance() or 0) or -1,
+            not R.running and 'stop' or R.paused and 'pause' or 'run', R.state or '', S.mode, S.role, duties,
+            t() and (t.CleanName() or '') or '', t() and (t.PctHPs() or 0) or 0, #hostiles(),
+            casting() and (me.Casting.Name() or '') or '', flags,
+            hasPet and (pet.CleanName() or '') or '', hasPet and (pet.PctHPs() or 0) or 0, cures, R.kills,
+            st.hrs > 0.02 and string.format('%.1f', st.xph) or '', st.hrs > 0.02 and string.format('%.2f', st.aaph) or '',
+            (R.log[#R.log] or ''):sub(1, 110), math.floor(st.fighting and st.fight or st.last),
+        }
+        for i, x in ipairs(v) do v[i] = (tostring(x):gsub('[|$]', '/')) end
+        return table.concat(v, '|')
+    end
+
+    local function parse(s)
+        if not s or s == '' or s == 'NULL' then return nil end
+        local d, n = {}, 0
+        for f in (s .. '|'):gmatch('([^|]*)|') do n = n + 1; if FIELDS[n] then d[FIELDS[n]] = f end end
+        if n < #FIELDS then return nil end
+        for _, k in ipairs({ 'lvl', 'hp', 'mana', 'endu', 'tgtHp', 'haters', 'petHp', 'kills', 'dps' }) do d[k] = tonumber(d[k]) or 0 end
+        return d
+    end
+
+    -- main loop, every pass: my status once a second; the peers (window open) once a second
+    function peersTick()
+        local now = mq.gettime()
+        if now - P.at >= 1000 then P.at, P.status = now, buildStatus() end
+        if not S.showPeers and not S.showHud then
+            for peer in pairs(P.observing) do mq.cmdf('/dobserve %s -q AutoXP -drop', peer) end
+            P.observing, P.rows = {}, {}
+            return
+        end
+        if now - P.readAt < 1000 then return end
+        P.readAt = now
+        local rows = { { name = ME, me = true, d = parse(P.status), fresh = true } }
+        if mq.TLO.Plugin('mq2dannet').IsLoaded() then
+            local self = mq.TLO.DanNet.Name() or ''
+            for peer in (mq.TLO.DanNet.Peers() or ''):gmatch('[^|]+') do
+                if peer ~= self then
+                    -- the DanNet TLO forgets the peer after one member: each read starts again from DanNet(peer)
+                    if mq.TLO.DanNet(peer).ObserveSet('AutoXP')() then P.observing[peer] = true
+                    elseif now - (P.tried[peer] or 0) > 10000 then P.tried[peer] = now; mq.cmdf('/dobserve %s -q AutoXP', peer) end
+                    local d = parse(mq.TLO.DanNet(peer).Observe('AutoXP')())
+                    local b = P.beat[peer]
+                    if d and (not b or b.v ~= d.beat) then P.beat[peer] = { v = d.beat, at = now } end
+                    local n = peer:gsub('^[^_]*_', '')
+                    table.insert(rows, { name = n:sub(1, 1):upper() .. n:sub(2), d = d,
+                        fresh = d ~= nil and now - (P.beat[peer] and P.beat[peer].at or 0) < 15000 })
+                end
+            end
+        end
+        -- me first, then my group in group order, then everyone else by name
+        local order = {}
+        for i = 1, (mq.TLO.Group.Members() or 0) do order[mq.TLO.Group.Member(i).Name() or ''] = i end
+        table.sort(rows, function(a, b)
+            if (a.me or false) ~= (b.me or false) then return a.me == true end
+            local oa, ob = order[a.name] or 99, order[b.name] or 99
+            if oa ~= ob then return oa < ob end
+            return a.name < b.name
+        end)
+        P.rows = rows
+    end
+
+    local function hpCol(pct)
+        if pct >= 70 then return 0.2, 0.7, 0.25 elseif pct >= 35 then return 0.85, 0.7, 0.1 end
+        return 0.85, 0.2, 0.2
+    end
+
+    local function pbar(pct, r, g, b)
+        if pct < 0 then ImGui.TextDisabled('-'); return end
+        ImGui.PushStyleColor(ImGuiCol.PlotHistogram, r, g, b, 1)
+        ImGui.ProgressBar(math.max(0, math.min(1, pct / 100)), -1, 15, tostring(pct))
+        ImGui.PopStyleColor()
+    end
+
+    local function details(r)
+        local d = r.d
+        if not d then return r.name .. ': no status - AutoXP is not running there, or DanNet has not answered yet' end
+        local duties = {}
+        for c in d.duties:gmatch('.') do table.insert(duties, DUTY[c] or c) end
+        local lines = {
+            string.format('%s  L%d %s  in %s', r.name, d.lvl, d.cls, d.zone),
+            string.format('AutoXP %s: %s, mode %s, role %s', d.run, d.state, d.mode, d.role),
+            'Duties: ' .. (#duties > 0 and table.concat(duties, ', ') or 'none'),
+            string.format('Kills %d', d.kills) .. (d.xph ~= '' and ('   XP ' .. d.xph .. '%/h') or '') .. (d.aaph ~= '' and ('   AA ' .. d.aaph .. '/h') or ''),
+        }
+        if d.pet ~= '' then table.insert(lines, string.format('Pet: %s %d%%', d.pet, d.petHp)) end
+        if d.last ~= '' then table.insert(lines, 'Last: ' .. d.last) end
+        if not r.fresh then table.insert(lines, '(no update for 15s or more)') end
+        return table.concat(lines, '\n')
+    end
+
+    local function drawRow(r)
+        local d = r.d
+        local dead = d and d.flags:find('D') ~= nil
+        ImGui.TableNextRow()
+        -- name (click: target them); the tooltip has the details
+        ImGui.TableNextColumn()
+        if dead then ImGui.PushStyleColor(ImGuiCol.Text, 1, 0.35, 0.35, 1)
+        elseif not d or not r.fresh then ImGui.PushStyleColor(ImGuiCol.Text, 0.55, 0.55, 0.55, 1)
+        else ImGui.PushStyleColor(ImGuiCol.Text, 1, 1, 1, 1) end
+        local _, pressed = ImGui.Selectable(r.name .. '##grp' .. r.name, false)
+        if pressed then mq.cmdf('/target pc =%s', r.name) end
+        ImGui.PopStyleColor()
+        tip(details(r))
+        ImGui.TableNextColumn(); if d then ImGui.Text(string.format('%d %s', d.lvl, d.cls)) end
+        ImGui.TableNextColumn(); if d then pbar(d.hp, hpCol(d.hp)) end
+        ImGui.TableNextColumn(); if d then pbar(d.mana, 0.25, 0.45, 0.95) end
+        ImGui.TableNextColumn(); if d then pbar(d.endu, 0.85, 0.6, 0.15) end
+        ImGui.TableNextColumn(); if d and d.dps > 0 then ImGui.Text(DPS.fmt(d.dps)); tip('This fight (or the last one)') end
+        -- AutoXP: running / paused / stopped, and its state
+        ImGui.TableNextColumn()
+        if d then
+            local ic, c = FA.PLAY, { 0.4, 0.9, 0.4 }
+            if d.run == 'pause' then ic, c = FA.PAUSE, { 1, 0.8, 0.3 } elseif d.run == 'stop' then ic, c = FA.STOP, { 0.6, 0.6, 0.6 } end
+            ImGui.TextColored(c[1], c[2], c[3], 1, ic); tip('AutoXP ' .. d.run)
+            ImGui.SameLine(0, 4)
+            local sc = STATECOL[d.state] or { 1, 1, 0.5, 1 }
+            ImGui.TextColored(sc[1], sc[2], sc[3], 1, d.state)
+        end
+        ImGui.TableNextColumn(); if d and d.tgt ~= '' then ImGui.Text(string.format('%s %d%%', d.tgt, d.tgtHp)) end
+        -- status icons
+        ImGui.TableNextColumn()
+        if not d or not r.fresh then
+            ImGui.TextColored(0.55, 0.55, 0.55, 1, FA.LOST); tip(d and 'No update for 15s or more' or 'No status: AutoXP is not running there?')
+        else
+            local first = true
+            local function nxt() if not first then ImGui.SameLine(0, 4) end; first = false end
+            local function fa(icon, cr, cg, cb, text) nxt(); ImGui.TextColored(cr, cg, cb, 1, icon); tip(text) end
+            local function eq(cell, text)
+                anim = anim or mq.FindTextureAnimation('A_SpellIcons')
+                if not anim then return end
+                nxt(); anim:SetTextureCell(cell); ImGui.DrawTextureAnimation(anim, 16, 16); tip(text)
+            end
+            if dead then nxt(); ImGui.TextColored(1, 0.3, 0.3, 1, 'DEAD') end
+            if d.flags:find('R') then eq(ICON.sick, 'Resurrection Sickness') end
+            if d.flags:find('I') then eq(ICON.invis, 'Invisible') end
+            if d.flags:find('U') then eq(ICON.ivu, 'Invisible versus undead') end
+            if d.haters > 0 then
+                fa(FA.WARN, 1, 0.35, 0.35, d.haters .. ' on extended target')
+                ImGui.SameLine(0, 2); ImGui.TextColored(1, 0.35, 0.35, 1, tostring(d.haters))
+            end
+            if d.cast ~= '' then fa(FA.MAGIC, 0.75, 0.55, 1, 'Casting ' .. d.cast) end
+            if d.flags:find('S') then fa(FA.BED, 0.6, 0.8, 1, 'Sitting') end
+            if d.flags:find('Z') then fa(FA.BOLT, 1, 0.9, 0.2, 'Stunned') end
+            if d.flags:find('F') then fa(FA.FEIGN, 0.7, 0.7, 0.7, 'Feigning death') end
+            if d.pet ~= '' then
+                local pr, pg, pb = hpCol(d.petHp)
+                fa(FA.PAW, pr, pg, pb, string.format('Pet %s %d%%', d.pet, d.petHp))
+            end
+            if d.cures ~= '' then
+                local out = {}
+                for k, n in d.cures:gmatch('(%a)(%d+)') do table.insert(out, (CURE[k] or k) .. ' ' .. n) end
+                fa(FA.FLASK, 0.4, 1, 0.6, 'Needs a cure: ' .. table.concat(out, ', '))
+            end
+            if d.zone ~= (mq.TLO.Zone.ShortName() or '') then fa(FA.MAP, 1, 0.65, 0.2, 'In ' .. d.zone) end
+        end
+        -- what it last did (its latest log line)
+        ImGui.TableNextColumn()
+        if d and d.last ~= '' then ImGui.TextDisabled(d.last:sub(10)); tip(d.last) end
+    end
+
+    function drawPeers()
+        if not S.showPeers then return end
+        ImGui.SetNextWindowSize(860, 215, ImGuiCond.FirstUseEver)
+        local open, show = ImGui.Begin('AutoXP Group##axpgroup', true)
+        if not open then S.showPeers = false end
+        if show then
+            local sum = 0
+            for _, r in ipairs(P.rows) do if r.d and r.fresh then sum = sum + r.d.dps end end
+            if sum > 0 then ImGui.TextColored(0.4, 0.8, 1, 1, 'Group DPS ' .. DPS.fmt(sum)); tip('Each character\'s DPS this fight (or the last one), added up') end
+            local tf = bit32.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.BordersInnerV, ImGuiTableFlags.SizingFixedFit, ImGuiTableFlags.Resizable)
+            if ImGui.BeginTable('##axppeers', 10, tf) then
+                ImGui.TableSetupColumn('Name', 0, 80)
+                ImGui.TableSetupColumn('Lvl', 0, 55)
+                ImGui.TableSetupColumn('HP', 0, 55)
+                ImGui.TableSetupColumn('Mana', 0, 55)
+                ImGui.TableSetupColumn('End', 0, 55)
+                ImGui.TableSetupColumn('DPS', 0, 50)
+                ImGui.TableSetupColumn('AutoXP', 0, 80)
+                ImGui.TableSetupColumn('Target', 0, 140)
+                ImGui.TableSetupColumn('Status', 0, 120)
+                ImGui.TableSetupColumn('Doing', ImGuiTableColumnFlags.WidthStretch)
+                ImGui.TableHeadersRow()
+                for _, r in ipairs(P.rows) do drawRow(r) end
+                ImGui.EndTable()
+            end
+        end
+        ImGui.End()
+    end
+
+    -- HUD: a small see-through window with my DPS and session stats; right-click for Reset stats / Hide HUD
+    function DPS.drawHud()
+        if not S.showHud then return end
+        ImGui.SetNextWindowBgAlpha(0.6)
+        local wf = bit32.bor(ImGuiWindowFlags.NoTitleBar, ImGuiWindowFlags.AlwaysAutoResize, ImGuiWindowFlags.NoFocusOnAppearing, ImGuiWindowFlags.NoNav)
+        local _, show = ImGui.Begin('AutoXP HUD##axphud', true, wf)
+        if show then
+            local s, f = DPS.stats(), DPS.fmt
+            local sc = STATECOL[R.state] or { 1, 1, 0.5, 1 }
+            local secs = math.floor(s.session / 1000)
+            ImGui.TextColored(1, 0.85, 0.4, 1, ME)
+            ImGui.SameLine(); ImGui.TextColored(sc[1], sc[2], sc[3], 1, not R.running and 'STOPPED' or R.paused and 'PAUSED' or R.state)
+            ImGui.SameLine(); ImGui.TextDisabled(string.format('%d:%02d:%02d', math.floor(secs / 3600), math.floor(secs / 60) % 60, secs % 60))
+            tip('Session time (since load or Reset stats)')
+            ImGui.TextDisabled('DPS'); ImGui.SameLine(); ImGui.TextColored(0.4, 1, 0.4, 1, f(s.now)); tip('The last 10 seconds of this fight')
+            ImGui.SameLine(); ImGui.TextDisabled('fight'); ImGui.SameLine(); ImGui.Text(f(s.fight)); tip('This fight so far')
+            ImGui.SameLine(); ImGui.TextDisabled('last'); ImGui.SameLine(); ImGui.Text(f(s.last)); tip('The last fight')
+            ImGui.SameLine(); ImGui.TextDisabled('avg'); ImGui.SameLine(); ImGui.Text(f(s.avg)); tip('Per second of fighting, this session')
+            if s.total > 0 then
+                local parts = {}
+                for _, k in ipairs({ 'melee', 'spell', 'dot', 'pet', 'ds' }) do
+                    if s.by[k] > 0 then table.insert(parts, string.format('%s %d%%', k, math.floor(s.by[k] * 100 / s.total + 0.5))) end
+                end
+                ImGui.TextDisabled('Dmg'); ImGui.SameLine(); ImGui.Text(f(s.total) .. '   ' .. table.concat(parts, '  '))
+                tip('Damage this session: melee, spells, DoTs, pets, damage shields')
+                ImGui.TextDisabled('Top'); ImGui.SameLine(); ImGui.Text(f(s.top) .. '  ' .. s.topBy)
+            end
+            local kills = tostring(s.kills)
+            if s.hrs > 0.02 then kills = kills .. string.format('  %.0f/h', s.kills / s.hrs) end
+            if s.kills > 0 then kills = kills .. string.format('  %.0fs each', s.killAvg) end
+            ImGui.TextDisabled('Kills'); ImGui.SameLine(); ImGui.Text(kills)
+            local xp = string.format('%.1f%%/h', s.xph)
+            if s.xph > 0 then
+                local h = (100 - (mq.TLO.Me.PctExp() or 0)) / s.xph
+                xp = xp .. string.format('  level in %dh%02dm', math.floor(h), math.floor(h * 60) % 60)
+            end
+            ImGui.TextDisabled('XP'); ImGui.SameLine(); ImGui.Text(xp .. string.format('   AA %.2f/h', s.aaph))
+            local sum, n = 0, 0
+            for _, r in ipairs(P.rows) do if r.d and r.fresh and r.d.dps > 0 then sum, n = sum + r.d.dps, n + 1 end end
+            if n > 1 then
+                ImGui.TextDisabled('Group'); ImGui.SameLine(); ImGui.TextColored(0.4, 0.8, 1, 1, f(sum) .. ' DPS')
+                tip('Each character\'s DPS this fight (or the last one), added up')
+            end
+            if ImGui.BeginPopupContextWindow() then
+                if ImGui.MenuItem('Reset stats') then DPS.reset() end
+                if ImGui.MenuItem('Hide HUD') then S.showHud = false end
+                ImGui.EndPopup()
+            end
+        end
+        ImGui.End()
+    end
+
+    -- ${AutoXP}: this character's packed status (what the group window of every other client reads);
+    -- ${AutoXP[dps]}: my damage breakdown. A TLO function returns the MQ type name and the value
+    pcall(mq.AddTopLevelObject, 'AutoXP', function(idx)
+        if idx == 'dps' then return 'string', DPS.line() end
+        return 'string', P.status
+    end)
+end
+
+function draw()
     if not R.open then return end
     local show
     R.open, show = ImGui.Begin('AutoXP', R.open)
@@ -1179,13 +2949,45 @@ local function draw()
         if m ~= S.mode then S.mode = m; log('mode %s', m) end
         updateMapRadius()
         ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); ImGui.SameLine(); roleButton('DPS')
-        ImGui.SameLine(); ImGui.Text('   Duties:'); ImGui.SameLine()
+        ImGui.Text('Duties:'); ImGui.SameLine()
         toggle('Heal', 'heal', 'Heal: heal yourself / group members below the Healing thresholds,\nand use Emergency abilities (Lay on Hands) below the emergency threshold.')
         ImGui.SameLine()
         toggle('CC', 'cc', 'CC: mez adds (Mez list), interrupt a casting target and stun adds\nthat are not your current target (CC stuns list). Mezzed adds are left for last.')
+        ImGui.SameLine()
+        toggle('Debuff', 'debuff', 'Debuff: slow, malo/tash and cripple the target once each (Debuffs list).\nThe best of each line in your spell book is kept memorized.')
+        ImGui.SameLine()
+        toggle('Nuke', 'nuke', 'Nuke: cast nukes at the target in a fight (Nukes list: damage stuns and swarm pets too).\nThe best nuke and undead nuke in your spell book are kept memorized.')
+        ImGui.SameLine()
+        toggle('DoT', 'dot', 'DoT: put each damage-over-time spell on the target once (DoTs list) while it is above 40%.')
+        ImGui.SameLine()
+        toggle('Rez', 'rez', 'Rez: in a fight, Call of the Wild on a dead group member (no exp, they can still get an exp rez).\nOut of combat, an exp rez AA (Blessing of Resurrection, Rejuvenation of Spirit) or your best rez spell, once per corpse.')
+        ImGui.SameLine()
+        toggle('Buff', 'buff', 'Buff: keep group members buffed too. HP, AC, resist and Unity buffs go to everyone,\nhaste, attack and strength to melee, mana regen to classes that use mana.')
         ImGui.Separator()
 
         ImGui.Text(string.format('%s  L%d %s  %s', mq.TLO.Me.CleanName() or '?', mq.TLO.Me.Level() or 0, mq.TLO.Me.Class.ShortName() or '', mq.TLO.Zone.ShortName() or '?'))
+        -- DanNet peers (refreshed once a second; "server_name" shown as "Name")
+        if mq.gettime() - (R.peersAt or 0) > 1000 then
+            R.peersAt, R.peers = mq.gettime(), nil
+            if mq.TLO.Plugin('mq2dannet').IsLoaded() then
+                local names = {}
+                for peer in (mq.TLO.DanNet.Peers() or ''):gmatch('[^|]+') do
+                    local n = peer:gsub('^[^_]*_', '')
+                    table.insert(names, n:sub(1, 1):upper() .. n:sub(2))
+                end
+                table.sort(names)
+                R.peers = names
+            end
+        end
+        if ImGui.SmallButton(S.showHud and 'Hide HUD##hud' or 'Show HUD##hud') then S.showHud = not S.showHud end
+        tip('AutoXP HUD: my DPS (now, this fight, last fight, session), damage breakdown, kills and XP / AA per hour.\nRight-click it to reset the stats.')
+        if R.peers then
+            ImGui.SameLine()
+            if ImGui.SmallButton(S.showPeers and 'Hide group##grp' or 'Show group##grp') then S.showPeers = not S.showPeers end
+            tip('AutoXP Group window: HP, mana, endurance, DPS, AutoXP state, target and status of every DanNet peer.')
+            ImGui.SameLine()
+            ImGui.TextColored(0.5, 0.8, 1, 1, string.format('DanNet (%d): %s', #R.peers, table.concat(R.peers, ' ')))
+        end
         bar(hp() / 100, string.format('HP %d%%', hp()))
         bar(mana() / 100, string.format('Mana %d%%', mana()))
         bar((mq.TLO.Me.PctExp() or 0) / 100, string.format('XP %.2f%%', mq.TLO.Me.PctExp() or 0))
@@ -1218,6 +3020,8 @@ local function draw()
             for _, s in ipairs(hs) do ImGui.Text(string.format('  %s %s %d%% (prio %d)', s.CleanName(), s.Class.ShortName() or '?', s.PctHPs() or 0, prio(s))) end
         end
 
+        -- only the tabs scroll: the status above and the Save button below stay in view
+        ImGui.BeginChild('##tabs', 0, -ImGui.GetFrameHeightWithSpacing(), false)
         if ImGui.BeginTabBar('tabs') then
             if ImGui.BeginTabItem('General') then
                 local zi = zoneInfo(S.zone)
@@ -1258,10 +3062,8 @@ local function draw()
                 S.minlvl = ImGui.SliderInt('Min level', S.minlvl, 1, 130)
                 S.maxlvl = ImGui.SliderInt('Max level', S.maxlvl, S.minlvl, 130)
                 S.radius = ImGui.SliderInt('Pull radius', S.radius, 100, 5000)
-                S.showRadius = ImGui.Checkbox('Show pull radius on map (Hunter)', S.showRadius)
-                S.avoidMobs = ImGui.Checkbox('Avoid other mobs when pulling', S.avoidMobs)
-                tip('Prefer pulls whose walking route stays clear of other NPCs, and detour around one when needed.')
-                if S.avoidMobs then S.avoidRadius = ImGui.SliderInt('Avoid radius', S.avoidRadius, 20, 120) end
+                S.avoidRadius = ImGui.SliderInt('Alone radius', S.avoidRadius, 40, 200)
+                tip('Hunter pulls the closest mob in level range within the pull radius, preferring one with no other NPC this close to it.')
                 ImGui.SetNextItemWidth(110)
                 local pm = combo('Pull with', S.pullMethod, PULLS)
                 if pm ~= S.pullMethod then S.pullMethod = pm; log('pull with %s', pm) end
@@ -1273,10 +3075,13 @@ local function draw()
                 tip('Pull from this far at most (and never past 80% of the pull range); moves closer if the pull fails.')
                 S.kills = ImGui.SliderInt('Kill count (Hunter)', S.kills, 1, 500)
                 S.assistName = ImGui.InputText('Main assist', S.assistName)
+                tip('Assist mode: whose target to attack. Blank = the group main assist (a Tank-role AutoXP sets itself).')
                 S.assistAt = ImGui.SliderInt('Assist at %', S.assistAt, 1, 100)
                 S.chaseName = ImGui.InputText('Chase target', S.chaseName)
+                tip('Chase mode: who to follow and assist. Blank = the group main tank (a Tank-role AutoXP sets itself).')
                 S.chaseDist = ImGui.SliderInt('Chase distance', S.chaseDist, 10, 200)
                 S.restPct = ImGui.SliderInt('Rest below %', S.restPct, 5, 95)
+                tip('Sit to rest / med when HP or mana drops below this out of combat (any mode; Chase only next to the leader).')
                 S.restTo = ImGui.SliderInt('Rest until %', S.restTo, 20, 100)
                 ImGui.EndTabItem()
             end
@@ -1289,7 +3094,7 @@ local function draw()
                 if ranged() then S.castRange = ImGui.SliderInt('Cast range', S.castRange, 30, 200) end
                 S.nukes = ImGui.InputText('Nukes (DPS)', S.nukes)
                 S.dots = ImGui.InputText('DoTs (DPS, once per target)', S.dots)
-                S.debuffs = ImGui.InputText('Slows (once per target)', S.debuffs)
+                S.debuffs = ImGui.InputText('Debuffs: slow, malo, cripple (once per target)', S.debuffs)
                 S.mez = ImGui.InputText('Mez (CC adds)', S.mez)
                 S.petSpell = ImGui.InputText('Pet summon', S.petSpell)
                 S.usePet = ImGui.Checkbox('Use pet', S.usePet)
@@ -1298,37 +3103,80 @@ local function draw()
                 S.ccStuns = ImGui.InputText('CC stuns (adds / interrupts)', S.ccStuns)
                 S.stunCooldown = ImGui.Checkbox('Stun on cooldown during fights (Tank)', S.stunCooldown)
                 S.combatBuffs = ImGui.InputText('Combat buffs (recast in fight)', S.combatBuffs)
-                S.buffs = ImGui.InputText('Self buffs', S.buffs)
-                tip('Filled from the spell book: HP, stat, resist, haste and proc buffs of 10+ minutes, best of each line.')
+                if mq.TLO.Me.Class.ShortName() == 'BRD' then
+                    S.songs = ImGui.InputText('Songs (kept going, first = most important)', S.songs)
+                    S.restSongs = ImGui.InputText('Rest songs (no mobs on XTarget: regen)', S.restSongs)
+                    tip("Filled from the memorized group/self songs in gem order. Selo's Sonata (AA) is kept up for the group too.")
+                    S.songManaMin = ImGui.SliderInt('Songs that cost mana above mana %', S.songManaMin, 0, 100)
+                end
+                S.buffs = ImGui.InputText('Buffs', S.buffs)
+                tip('Filled from the spell book: HP, stat, resist, haste, Unity and proc buffs of 10+ minutes, best of each line.\nHaste/attack/strength only on melee, mana regen only on classes with mana; group members with the Buff duty.')
                 S.memBuffs = ImGui.Checkbox('Memorize missing buffs (borrows the last gem, then puts it back)', S.memBuffs)
                 S.useTaunt = ImGui.Checkbox('Taunt when aggro < 100% (Tank)', S.useTaunt)
                 S.prioritize = ImGui.Checkbox('Tank target priority: casters > healers > hybrids > melee', S.prioritize)
                 S.keepInFront = ImGui.Checkbox('Reposition so all mobs are in front of me (melee)', S.keepInFront)
                 if ImGui.Button('Fill from memorized gems') then fillFromGems() end
-                S.autoMem = ImGui.Checkbox('Auto-memorize spell upgrades (out of combat)', S.autoMem)
-                tip('Swaps a memorized spell for a higher-level scribed spell of the same kind (e.g. Stun over Cease).\nSpell lists refresh from the gems whenever they change.')
+                S.autoMem = ImGui.Checkbox('Auto-memorize spell upgrades and nukes (out of combat)', S.autoMem)
+                tip('Swaps a memorized spell for a higher-level scribed spell of the same kind (e.g. Stun over Cease),\nand keeps the best nuke and undead nuke memorized over a self-buff gem.\nSpell lists refresh from the gems whenever they change.')
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem('Abilities') then
                 if ImGui.Button('Scan class abilities') then scanAbilities() end
+                tip('Reads skills, disciplines and class AAs and sorts them by what their spells do.\nRoles you pick yourself are kept on a rescan; older ranks of a line are set Off.')
                 ImGui.SameLine(); ImGui.Text(string.format('%d found', #S.abilities))
-                for i, a in ipairs(S.abilities) do
-                    local on = a.enabled ~= false
-                    local c = on and ON or OFF
-                    ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
-                    if ImGui.Button(string.format('%s##ab%d', on and 'ON' or 'OFF', i), 50, 22) then
-                        a.enabled = not on; log('%s %s', a.name, a.enabled and 'ON' or 'OFF'); save()
-                    end
-                    ImGui.PopStyleColor()
+                ImGui.SameLine()
+                if ImGui.Button('Burn now (60s)') then R.burnUntil = mq.gettime() + 60000; log('burn: manual, 60s') end
+                S.burnNamed = ImGui.Checkbox('Burn on named', S.burnNamed); ImGui.SameLine()
+                S.burnLevel = ImGui.Checkbox('Burn at/above my level', S.burnLevel); ImGui.SameLine()
+                S.burnAdds = ImGui.Checkbox('Burn on 3+ mobs', S.burnAdds)
+                S.defPct = ImGui.SliderInt('Defense below HP %', S.defPct, 10, 90)
+                tip('Defense (mitigate) abilities below this. Sustained ones (Carapace, Mantle) also while tanking a named or 2+ mobs.')
+                S.panicPct = ImGui.SliderInt('Panic below HP %', S.panicPct, 5, 60)
+                tip('Defense (panic) abilities - short big absorbs and blocks (Spurn, Deflection) - below this.')
+                S.endPct = ImGui.SliderInt('Endurance abilities below %', S.endPct, 5, 90)
+                ImGui.SetNextItemWidth(120)
+                S.abilFilter = combo('Show##abf', S.abilFilter, SHOWROLES)
+                local older = 0
+                for _, a in ipairs(S.abilities) do if a.note == 'older rank' or a.note == 'low level' then older = older + 1 end end
+                if older > 0 then
                     ImGui.SameLine()
-                    local ready = abilityReady(a)
-                    ImGui.TextColored(ready and 0.5 or 0.6, ready and 1 or 0.6, ready and 0.5 or 0.6, 1, string.format('%s  (%s, %s)', a.name, a.kind, a.role))
+                    R.showOld = ImGui.Checkbox(string.format('show %d older / low-level', older), R.showOld or false)
+                end
+                ImGui.Separator()
+                local move
+                for i, a in ipairs(S.abilities) do
+                    if (S.abilFilter == 'All' or a.role == S.abilFilter) and (R.showOld or (a.note ~= 'older rank' and a.note ~= 'low level')) then
+                        local on = a.enabled ~= false
+                        local c = on and ON or OFF
+                        ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
+                        if ImGui.Button(string.format('%s##ab%d', on and 'ON' or 'OFF', i), 44, 20) then
+                            a.enabled = not on; log('%s %s', a.name, a.enabled and 'ON' or 'OFF'); save()
+                        end
+                        ImGui.PopStyleColor()
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(95)
+                        local r = combo('##role' .. i, a.role, ROLES)
+                        if r ~= a.role then a.role, a.userRole, a.note = r, true, nil; log('%s -> %s', a.name, r); save() end
+                        ImGui.SameLine(); if ImGui.SmallButton('^##up' .. i) and i > 1 then move = { i, i - 1 } end
+                        ImGui.SameLine(); if ImGui.SmallButton('v##dn' .. i) and i < #S.abilities then move = { i, i + 1 } end
+                        ImGui.SameLine()
+                        local st, why, secs = abilityStatus(a)
+                        local ready = st == 'ready'
+                        ImGui.TextColored(ready and 0.5 or 0.6, ready and 1 or 0.6, ready and 0.5 or 0.6, 1,
+                            string.format('%s  (%s%s%s)', a.name, a.kind, a.tier and (', ' .. a.tier) or '', a.note and (', ' .. a.note) or ''))
+                        tip(string.format('%s\n%s%s', ABILUSE[a.role] or '', why, secs > 0 and (' - ' .. fmtSecs(secs) .. ' left') or ''))
+                    end
+                end
+                if move then
+                    S.abilities[move[1]], S.abilities[move[2]] = S.abilities[move[2]], S.abilities[move[1]]
+                    S.abilOrdered = true; save()
                 end
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem('Healing') then
                 S.healSpells = ImGui.InputText('Heals (best first)', S.healSpells)
                 S.selfHealPct = ImGui.SliderInt('Heal self below %', S.selfHealPct, 5, 95)
+                S.tankHealPct = ImGui.SliderInt('Heal main tank below %', S.tankHealPct, 5, 95)
+                tip('The group main tank is healed below this; it comes first when it is the most behind its threshold.')
                 S.groupHealPct = ImGui.SliderInt('Heal group below %', S.groupHealPct, 5, 95)
                 S.emergencyPct = ImGui.SliderInt('Emergency abilities below %', S.emergencyPct, 5, 60)
                 ImGui.EndTabItem()
@@ -1339,38 +3187,49 @@ local function draw()
             end
             ImGui.EndTabBar()
         end
+        ImGui.EndChild()
         if ImGui.Button('Save settings') then save(); log('settings saved') end
     end
     ImGui.End()
+    drawPeers()
+    DPS.drawHud()
     if not R.open then R.terminate = true end
+end
 end
 
 mq.imgui.init('AutoXP', draw)
 mq.bind('/autoxp', function(cmd, a1)
-    local duties = { heal = true, cc = true }
+    local duties = { heal = true, cc = true, debuff = true, nuke = true, dot = true, buff = true, rez = true }
     if cmd == 'start' then start() elseif cmd == 'stop' then stopAll('command')
     elseif cmd == 'pause' then setPaused(true) elseif cmd == 'resume' then setPaused(false)
     elseif cmd == 'spells' then startSpellScan(); log('checking spell book...')
+    elseif cmd == 'burn' then R.burnUntil = mq.gettime() + 60000; log('burn: manual, 60s')
     elseif cmd == 'show' then R.open = true elseif cmd == 'scan' then scanAbilities() elseif cmd == 'save' then save(); log('settings saved')
     elseif cmd == 'mode' and a1 then
         for _, m in ipairs(MODES) do if m:lower() == a1:lower() then S.mode = m; log('mode %s', m) end end
     elseif cmd == 'role' and a1 and (a1:lower() == 'tank' or a1:lower() == 'dps') then S.role = a1:lower() == 'tank' and 'Tank' or 'DPS'; log('role %s', S.role)
     elseif cmd == 'tank' then S.role = 'Tank'; log('role Tank') elseif cmd == 'dps' then S.role = 'DPS'; log('role DPS')
+    elseif cmd == 'group' then S.showPeers = not S.showPeers
+    elseif cmd == 'hud' then S.showHud = not S.showHud
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc [on|off]|spells')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|group|hud|spells|burn')
 
 startSpellScan()
 while not R.terminate do
     if not SP.scanning and SP.done and (mq.TLO.Me.Level() or 0) ~= SP.level then startSpellScan() end
     local sok, serr = pcall(stepSpellScan)
     if not sok then log('spell scan error: %s', tostring(serr)); SP.scanning = false end
+    mq.doevents()
+    DPS.tick()
+    local pok, perr = pcall(peersTick)
+    if not pok and perr ~= R.peerErr then R.peerErr = perr; log('group view error: %s', tostring(perr)) end
     if R.running and not R.paused then
         local ok, err = pcall(step)
         if not ok then log('error: %s', tostring(err)); stopAll('error') end
     end
-    mq.delay(100)
+    mq.delay(50)
 end
 stopAll('window closed')
 save()
