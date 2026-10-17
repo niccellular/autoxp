@@ -14,6 +14,8 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp heal|cc|debuff|nuke|dot|buff|rez [on|off]
 /autoxp group          (show / hide the AutoXP Group window)
 /autoxp hud            (show / hide the HUD)
+/autoxp backup [on|off]          (backup tank)
+/autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
 ```
 
 Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goes to `<MQ>/lua/autoxp_log_<Name>.txt`.
@@ -27,6 +29,10 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Modes:** Hunter (finds mobs in a level range and radius), Assist, Chase, Manual.
 - **Role:** Tank (front, taunt, stun-lock, target priority, keeps mobs in front) or DPS (behind or at range).
   Duties are separate toggles: Heal, CC, Debuff, Nuke, DoT, Buff, Rez (e.g. a healer can opt out of nukes or DoTs).
+  **Backup** (backup tank): while the group main tank is dead or out of the zone, this character tanks in its place
+  (Tank role), and goes back to its own role once the main tank is alive and the fight is over.
+  Non-tanks in Chase / Assist join a pulled mob once it has reached the main tank (or after 6s), so they don't
+  pull it off the tank on the way in.
 - **Class setup:** scans skills, disciplines and class AAs; fills spell lists from memorized gems (heals, stuns, nukes,
   DoTs, slows, mez, pet, buffs); casters and priests fight from range.
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
@@ -38,7 +44,8 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   Healers (Heal duty) keep the two best direct single-target heals and the two best heals-over-time memorized.
 - **CC duty:** mezzes adds as soon as they show up (in any state, right after heals) and never the tank's target.
   Two or more awake adds around the caster take the AE mez (bards: Wave of ..., kept memorized; a nuke's gem is
-  used when Nuke duty is off), otherwise single mezzes nearest first; a resisted mez is recast right away.
+  used when Nuke duty is off), otherwise single mezzes nearest first; a resisted mez is recast right away, and
+  after a 2nd resist on the same add the mezzer gives up on it (back to the other adds and songs).
 - **Debuff duty:** slow, malo and cripple the target, then each add — a malo'd add takes a mez far more often
   (bard mezzes are Magic-resisted) and a slowed one hits softer. With a bard or enchanter in the group the adds
   waiting on a mez get the malo first, from any state. Mezzed adds only get debuffs that do no damage.

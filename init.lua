@@ -36,7 +36,7 @@ local S = {
     style = 'Auto', castRange = 100, mez = '', dots = '', debuffs = '', petSpell = '', usePet = true, class = '',
     songs = '', restSongs = '', songManaMin = 10, fillVer = 0, swapGem = false,
     defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true,
-    abilVer = 0, abilOrdered = false, abilFilter = 'All', pouchNames = 'Pouch of Quellious, Phantom Weapon Pack', showPeers = true, showHud = true,
+    abilVer = 0, abilOrdered = false, abilFilter = 'All', pouchNames = 'Pouch of Quellious, Phantom Weapon Pack', showPeers = true, showHud = true, backupTank = false,
     abilities = {},   -- { {name=, kind='skill'|'aa'|'disc', role=} }
 }
 local function loadConfig(path)
@@ -67,7 +67,7 @@ local R = {
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
     ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0, nukeLevel = 0, nukeDebuff = nil,
-    mobCast = {}, buffTry = {}, buffChecked = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {},
+    mobCast = {}, buffTry = {}, buffChecked = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {},
 }
 -- one log per character: several clients run AutoXP at once
 local logf = io.open(mq.luaDir .. '/autoxp_log_' .. ME .. '.txt', 'a')
@@ -76,6 +76,12 @@ local function log(fmt, ...)
     table.insert(R.log, s)
     if #R.log > 300 then table.remove(R.log, 1) end
     if logf then logf:write(s .. '\n'); logf:flush() end
+end
+
+-- an error outside step() (a chat event, a window) is logged once instead of ending the script: five clients stopped
+-- mid-fight at once (2026-10-16 19:15) with nothing in their logs, and the group wiped without its tank
+local function oops(where, err)
+    if err ~= R.lastOops then R.lastOops = err; log('%s error: %s', where, tostring(err)) end
 end
 
 local function setState(s) if R.state ~= s then R.state = s; R.stateSince = mq.gettime() end end
@@ -103,7 +109,10 @@ end
 
 local function save()
     S.swapGem = R.swapGem and { g = R.swapGem.g, name = R.swapGem.name } or false
+    local role = S.role
+    if R.backupFrom then S.role = R.backupFrom end   -- tanking as the backup tank is never saved as my role
     mq.pickle(CONFIG, S)
+    S.role = role
 end
 
 local function list(str)
@@ -294,7 +303,7 @@ local function readyNow(a)
 end
 
 local function abilityReady(a)
-    if blocked(a.name) or not readyNow(a) then return false end
+    if blocked(a.name) or not readyNow(a) or (R.abilNext[a.name] or 0) > mq.gettime() then return false end
     if a.kind == 'skill' then return true end
     local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
     return not sp() or (sp.EnduranceCost() or 0) <= (mq.TLO.Me.CurrentEndurance() or 0)
@@ -314,6 +323,16 @@ local function useAbility(a, id, why)
     if a.kind == 'skill' then mq.cmdf('/doability "%s"', a.name)
     elseif a.kind == 'aa' then mq.cmdf('/alt act %d', mq.TLO.Me.AltAbility(a.name).ID() or 0)
     elseif a.kind == 'disc' then mq.cmdf('/disc %s', a.name) end
+    -- an AA with no reuse timer (beastlord Gelid Rending / Bite of the Asp, ranger Heavy Arrow, Selo's Kick...) always
+    -- reads ready, so whether it fired can't be told: trust it, and use it again after 3s (or its spell's recast)
+    if a.kind == 'aa' and (mq.TLO.Me.AltAbility(a.name).ReuseTime() or 0) == 0 then
+        local sp = mq.TLO.Me.AltAbility(a.name).Spell
+        R.abilNext[a.name] = mq.gettime() + math.max(3000, sp() and sp.RecastTime() or 0)
+        mq.delay(200)
+        if id ~= R.targetId then restoreFight() end
+        log('use %s %s (%s)', a.kind, a.name, why)
+        return true
+    end
     mq.delay(1000, function() return not readyNow(a) end)
     if id ~= R.targetId then restoreFight() end
     if readyNow(a) then backoff(a.name, 'did not fire', 20000); return false end
@@ -930,8 +949,21 @@ mq.event('axpResist', '#1# resisted your #2#!', function(_, who, spell)
     for _, s in ipairs(hostiles()) do
         if (s.CleanName() or ''):lower() == name then R.mobCast[s.ID() .. '|' .. spell] = nil end
     end
+    -- a resisted mez: again right away, but after the 2nd resist on that add the mezzer gives up on it
     for _, m in ipairs(list(S.mez)) do
-        if m == spell then unmez(who); log('%s resisted %s - mezzing again', who, spell); return end
+        if m == spell then
+            local id = R.lastMez and (R.lastMez.name or ''):lower() == name and R.lastMez.id or nil
+            if not id then
+                for _, s in ipairs(hostiles()) do if (s.CleanName() or ''):lower() == name then id = s.ID(); break end end
+            end
+            unmez(who)
+            if id then
+                R.mezResist[id] = (R.mezResist[id] or 0) + 1
+                if R.mezResist[id] >= 2 then R.noMez[id] = true; log('%s resisted %s twice - giving up mezzing it', who, spell); return end
+            end
+            log('%s resisted %s - mezzing again', who, spell)
+            return
+        end
     end
 end)
 
@@ -1045,24 +1077,52 @@ local function doCC(t)
             local sp = mq.TLO.Spell(m)
             local tt = sp.TargetType() or ''
             if tt == 'Single' then table.insert(single, m)
-            elseif gemUp(m) then
+            elseif gemUp(m) and not blocked(m) then
+                -- AE mez first: centred on the awake add with the most awake adds around it. A PB AE (bard) steps in
+                -- there first - songs carry on while moving - and gives up stepping after 5s
                 local r = (sp.AERange() or 0) > 0 and sp.AERange() or 30
-                local near = {}
+                local function d3(a, b) return math.sqrt((a.X() - b.X()) ^ 2 + (a.Y() - b.Y()) ^ 2 + (a.Z() - b.Z()) ^ 2) end
+                local awake = {}
                 for _, x in ipairs(adds) do
-                    if not keep[x.ID()] and not mezzed(x) and (x.Distance3D() or 999) <= r then table.insert(near, x) end
+                    if not keep[x.ID()] and not mezzed(x) and not R.noMez[x.ID()] and x.LineOfSight() then table.insert(awake, x) end
                 end
-                if #near >= 2 and castOn(m, tt == 'Targeted AE' and near[1].ID() or myId(), string.format('AE mez, %d adds', #near), 'cc') then
-                    local untilT = mq.gettime() + ((sp.Duration.TotalSeconds() or 18) - 6) * 1000
-                    for _, x in ipairs(near) do R.mezzed[x.ID()] = untilT end
-                    return true
+                local best, bestN = nil, 0
+                for _, a in ipairs(awake) do
+                    local n = 0
+                    for _, b in ipairs(awake) do if d3(a, b) <= r * 0.9 then n = n + 1 end end
+                    if n > bestN then best, bestN = a, n end
+                end
+                if best and bestN >= 2 then
+                    local now = mq.gettime()
+                    if tt == 'PB AE' and (best.Distance3D() or 999) > r * 0.6 then
+                        if (R.aeStepAt or 0) == 0 then R.aeStepAt = now end
+                        if now - R.aeStepAt < 5000 then
+                            if not mq.TLO.Navigation.Active() then mq.cmdf('/nav id %d distance=%d', best.ID(), math.floor(r * 0.4)) end
+                            return true
+                        end
+                    else
+                        if mq.TLO.Navigation.Active() and (R.aeStepAt or 0) > 0 then mq.cmd('/nav stop') end
+                        local center = tt == 'Targeted AE' and best or mq.TLO.Me
+                        local hit = {}
+                        for _, x in ipairs(awake) do if d3(center, x) <= r then table.insert(hit, x) end end
+                        if castOn(m, tt == 'Targeted AE' and best.ID() or myId(), string.format('AE mez, %d adds', #hit), 'cc') then
+                            local untilT = now + ((sp.Duration.TotalSeconds() or 18) - 6) * 1000
+                            for _, x in ipairs(hit) do R.mezzed[x.ID()] = untilT end
+                            R.aeStepAt = 0
+                            return true
+                        end
+                    end
+                else
+                    R.aeStepAt = 0
                 end
             end
         end
         table.sort(adds, function(a, b) return (a.Distance3D() or 999) < (b.Distance3D() or 999) end)
         for _, x in ipairs(adds) do
-            if not keep[x.ID()] and not mezzed(x) then
+            if not keep[x.ID()] and not mezzed(x) and not R.noMez[x.ID()] then
                 for _, m in ipairs(single) do
                     if castOn(m, x.ID(), 'mez add', 'cc') then
+                        R.lastMez = { id = x.ID(), name = x.CleanName() }
                         R.mezzed[x.ID()] = mq.gettime() + ((mq.TLO.Spell(m).Duration.TotalSeconds() or 18) - 6) * 1000
                         return true
                     end
@@ -1362,14 +1422,17 @@ end
 local function doDps(t)
     -- both roles use DPS abilities + nukes; Tank-only abilities/stuns are handled in doTank
     if not alive(t) then return false end
+    -- spells first when one is ready (DoTs once per mob, then nukes); the instant abilities fill the gaps between
+    -- casts. Abilities first starved the spells: one with no reuse timer is ready again every few seconds
+    if mana() >= S.nukeManaMin then
+        if S.dot and (t.PctHPs() or 0) > 40 then
+            for _, d in ipairs(list(S.dots)) do if not onMob(t, d) and castOnMob(d, t, 'dot') then return true end end
+        end
+        if S.nuke then
+            for _, n in ipairs(list(S.nukes)) do if castOn(n, t.ID(), 'nuke') then return true end end
+        end
+    end
     for _, a in ipairs(abilitiesFor('DPS')) do if useAbility(a, t.ID(), 'dps') then return true end end
-    if mana() < S.nukeManaMin then return false end
-    if S.dot and (t.PctHPs() or 0) > 40 then
-        for _, d in ipairs(list(S.dots)) do if not onMob(t, d) and castOnMob(d, t, 'dot') then return true end end
-    end
-    if S.nuke then
-        for _, n in ipairs(list(S.nukes)) do if castOn(n, t.ID(), 'nuke') then return true end end
-    end
     return false
 end
 
@@ -1989,7 +2052,31 @@ end
 
 -- Tank role: make myself the group's main tank and main assist (needs group leader), so Chase and
 -- Assist characters with no name typed in follow / assist me
+-- Backup tank (Backup on): in a fight while the group's main tank (not me) is dead or out of the zone, tank in its
+-- place - the Tank role (taunt, Tank abilities, mobs in front, target priority). Back to my own role when the fight
+-- is over (nothing on the extended target list); the next fight checks again. Out of a fight (the tank travelling)
+-- nothing changes
+local function backupCheck()
+    if not S.backupTank then
+        if R.backupFrom then S.role, R.backupFrom = R.backupFrom, nil; log('backup tank off - back to %s', S.role) end
+        return
+    end
+    local mt = mq.TLO.Group.MainTank
+    local name = mt() and mt.Name() or ''
+    if name == '' or name == (mq.TLO.Me.CleanName() or '') then return end
+    local down = mt.OtherZone() or not mt.Present() or mt.Type() == 'Corpse'
+    local fight = #hostiles() > 0
+    if down and fight and not R.backupFrom and S.role ~= 'Tank' then
+        R.backupFrom, S.role = S.role, 'Tank'
+        log('main tank %s is down - tanking as the backup tank', name)
+    elseif R.backupFrom and not fight then
+        S.role, R.backupFrom = R.backupFrom, nil
+        log('fight over - backup tank back to %s', S.role)
+    end
+end
+
 local function claimGroupRoles()
+    backupCheck()
     if S.role ~= 'Tank' or (mq.TLO.Group.Members() or 0) == 0 or mq.gettime() - R.lastRoles < 30000 then return end
     R.lastRoles = mq.gettime()
     local me = mq.TLO.Me.CleanName() or ''
@@ -2036,11 +2123,28 @@ local function findable()
     return names
 end
 
+-- a pulled mob is joined once it has reached the main tank (within 30), or after 6s - so nobody pulls its aggro off
+-- the tank on the way in (a pull spell alone can take it under the assist %, and it's on the extended target list
+-- as soon as it aggros)
+local function atTank(t)
+    local mt = mq.TLO.Group.MainTank
+    if not mt() or not mt.Present() or mt.Type() == 'Corpse' or (mt.ID() or 0) == myId() then return true end
+    local s = mq.TLO.Spawn('id ' .. (mt.ID() or 0))
+    if s() and t.X() and s.X() then
+        if math.sqrt((t.X() - s.X()) ^ 2 + (t.Y() - s.Y()) ^ 2 + (t.Z() - s.Z()) ^ 2) <= 30 then return true end
+    end
+    if R.assistSeen ~= t.ID() then R.assistSeen, R.assistSeenAt = t.ID(), mq.gettime() end
+    return mq.gettime() - R.assistSeenAt >= 6000
+end
+
 local function pickTarget()
-    -- anything already on us comes first (priority order)
+    -- anything already on us comes first (priority order); a non-tank following the group waits for it to reach the tank
     R.pendingDetour, R.pullCandidate = nil, false
     local best = bestTarget()
-    if best then return best.ID() end
+    if best then
+        if S.role == 'Tank' or (S.mode ~= 'Chase' and S.mode ~= 'Assist') or atTank(best) then return best.ID() end
+        return nil
+    end
     if S.mode == 'Manual' then
         local t = mq.TLO.Target
         if t() and t.Type() == 'NPC' and R.attacking then return t.ID() end
@@ -2107,7 +2211,7 @@ local function pickTarget()
             if mq.gettime() - R.lastAssist > 1500 then mq.cmdf('/assist %s', who); R.lastAssist = mq.gettime(); mq.delay(300) end
             t = mq.TLO.Target
         end
-        if t() and t.Type() == 'NPC' and (t.PctHPs() or 100) <= S.assistAt then return t.ID() end
+        if t() and t.Type() == 'NPC' and (t.PctHPs() or 100) <= S.assistAt and atTank(t) then return t.ID() end
         if mq.TLO.Me.Combat() then attackOff() end   -- "attack on assist" before we mean to fight
         return nil
     end
@@ -2145,7 +2249,8 @@ local function ccNeeded()
     if #adds < 2 then return false end
     local tank = mq.TLO.Me.GroupAssistTarget.ID() or 0
     for _, x in ipairs(adds) do
-        if x.ID() ~= R.targetId and x.ID() ~= tank and not mezzed(x) and x.LineOfSight() and (x.Distance3D() or 999) <= range then
+        if x.ID() ~= R.targetId and x.ID() ~= tank and not mezzed(x) and not R.noMez[x.ID()] and x.LineOfSight()
+            and (x.Distance3D() or 999) <= range then
             return true
         end
     end
@@ -2845,6 +2950,7 @@ do
         local open, show = ImGui.Begin('AutoXP Group##axpgroup', true)
         if not open then S.showPeers = false end
         if show then
+            local okB, errB = pcall(function()
             local sum = 0
             for _, r in ipairs(P.rows) do if r.d and r.fresh then sum = sum + r.d.dps end end
             if sum > 0 then ImGui.TextColored(0.4, 0.8, 1, 1, 'Group DPS ' .. DPS.fmt(sum)); tip('Each character\'s DPS this fight (or the last one), added up') end
@@ -2864,6 +2970,8 @@ do
                 for _, r in ipairs(P.rows) do drawRow(r) end
                 ImGui.EndTable()
             end
+            end)
+            if not okB then oops('group window', errB) end
         end
         ImGui.End()
     end
@@ -2875,6 +2983,7 @@ do
         local wf = bit32.bor(ImGuiWindowFlags.NoTitleBar, ImGuiWindowFlags.AlwaysAutoResize, ImGuiWindowFlags.NoFocusOnAppearing, ImGuiWindowFlags.NoNav)
         local _, show = ImGui.Begin('AutoXP HUD##axphud', true, wf)
         if show then
+            local okB, errB = pcall(function()
             local s, f = DPS.stats(), DPS.fmt
             local sc = STATECOL[R.state] or { 1, 1, 0.5, 1 }
             local secs = math.floor(s.session / 1000)
@@ -2916,6 +3025,8 @@ do
                 if ImGui.MenuItem('Hide HUD') then S.showHud = false end
                 ImGui.EndPopup()
             end
+            end)
+            if not okB then oops('HUD', errB) end
         end
         ImGui.End()
     end
@@ -2933,6 +3044,7 @@ function draw()
     local show
     R.open, show = ImGui.Begin('AutoXP', R.open)
     if show then
+        local okBody, errBody = pcall(function()
         if not R.running then
             if ImGui.Button('Start', 70, 26) then start() end
         else
@@ -2949,6 +3061,8 @@ function draw()
         if m ~= S.mode then S.mode = m; log('mode %s', m) end
         updateMapRadius()
         ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); ImGui.SameLine(); roleButton('DPS')
+        ImGui.SameLine()
+        toggle('Backup', 'backupTank', 'Backup tank: while the group main tank is dead or out of the zone, tank in its place\n(Tank role: taunt, Tank abilities, mobs in front, target priority); back to DPS once it is alive\nand nothing is on the extended target list.')
         ImGui.Text('Duties:'); ImGui.SameLine()
         toggle('Heal', 'heal', 'Heal: heal yourself / group members below the Healing thresholds,\nand use Emergency abilities (Lay on Hands) below the emergency threshold.')
         ImGui.SameLine()
@@ -3189,16 +3303,20 @@ function draw()
         end
         ImGui.EndChild()
         if ImGui.Button('Save settings') then save(); log('settings saved') end
+        end)
+        if not okBody then oops('window', errBody) end
     end
     ImGui.End()
-    drawPeers()
-    DPS.drawHud()
+    local okP, errP = pcall(drawPeers)
+    if not okP then oops('group window', errP) end
+    local okH, errH = pcall(DPS.drawHud)
+    if not okH then oops('HUD', errH) end
     if not R.open then R.terminate = true end
 end
 end
 
 mq.imgui.init('AutoXP', draw)
-mq.bind('/autoxp', function(cmd, a1)
+mq.bind('/autoxp', function(cmd, a1, a2)
     local duties = { heal = true, cc = true, debuff = true, nuke = true, dot = true, buff = true, rez = true }
     if cmd == 'start' then start() elseif cmd == 'stop' then stopAll('command')
     elseif cmd == 'pause' then setPaused(true) elseif cmd == 'resume' then setPaused(false)
@@ -3211,18 +3329,29 @@ mq.bind('/autoxp', function(cmd, a1)
     elseif cmd == 'tank' then S.role = 'Tank'; log('role Tank') elseif cmd == 'dps' then S.role = 'DPS'; log('role DPS')
     elseif cmd == 'group' then S.showPeers = not S.showPeers
     elseif cmd == 'hud' then S.showHud = not S.showHud
+    elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
+    elseif cmd == 'set' and a1 and a2 and S[a1] ~= nil and type(S[a1]) ~= 'table' then
+        -- /autoxp set <setting> <value>: any plain setting, e.g. groupHealPct 65
+        if type(S[a1]) == 'number' then S[a1] = tonumber(a2) or S[a1]
+        elseif type(S[a1]) == 'boolean' then S[a1] = a2 == 'on' or a2 == 'true' or a2 == '1'
+        else S[a1] = a2 end
+        log('%s = %s', a1, tostring(S[a1]))
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|group|hud|spells|burn')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|group|hud [on|off]|set <setting> <value>|spells|burn')
 
 startSpellScan()
 while not R.terminate do
-    if not SP.scanning and SP.done and (mq.TLO.Me.Level() or 0) ~= SP.level then startSpellScan() end
+    if not SP.scanning and SP.done and (mq.TLO.Me.Level() or 0) ~= SP.level then pcall(startSpellScan) end
     local sok, serr = pcall(stepSpellScan)
     if not sok then log('spell scan error: %s', tostring(serr)); SP.scanning = false end
-    mq.doevents()
-    DPS.tick()
+    local eok, eerr = pcall(mq.doevents)
+    if not eok then oops('event', eerr) end
+    local dok, derr = pcall(DPS.tick)
+    if not dok then oops('dps', derr) end
+    -- settings saved every 15s: /lua stop (or a crash) skips the save on exit, and a toggle made since was lost
+    if mq.gettime() - (R.savedAt or 0) > 15000 then R.savedAt = mq.gettime(); pcall(save) end
     local pok, perr = pcall(peersTick)
     if not pok and perr ~= R.peerErr then R.peerErr = perr; log('group view error: %s', tostring(perr)) end
     if R.running and not R.paused then
