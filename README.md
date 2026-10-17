@@ -56,9 +56,12 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically).
 - **Buff duty:** self, group and pet buffs; each group member in range is checked every 30s, and a group version
   within 10 levels of the best single-target one wins (one cast buffs everybody). Idle with nothing around, the
-  buffers go over their buffs before the next pull.
+  buffers go over their buffs before the next pull. A buff the game refuses ("Blocked by" a better one) isn't
+  cast again on anyone who has that better buff.
 - **Mana:** under 50% mana, in or out of combat, clicks a Modulation Shard from the bags (above 70% HP), else uses
   a Mana ability (role Mana: Elemental Conversion; Summon Modulation Shard only when none is in the bags).
+- **Cursor:** a summoned item left on the cursor (Modulation Shard, mod rod, pet weapon) goes into the bags after 2s
+  (with a full hand nothing can be memorized); never while a trade, give, merchant or bank window is open.
 - **Rez duty:** in a fight only Call of the Wild (no exp, on someone still dead); out of combat an exp rez AA or
   the best rez spell, once per corpse. Out of combat a character with a rez also resurrects its own corpse, walking
   to it on the mesh first.

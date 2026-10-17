@@ -67,7 +67,8 @@ MacroQuest Lua leveling automation (`init.lua`, `zones.lua`). Private repo nicce
 - All clients share `<MQ>/lua` and `<MQ>/config`; DanNet channel `new_test` reaches the group: `/dgae new_test <cmd>`
   (includes self), `/dex test_<name> <cmd>`, `/dquery test_<name> -q "<TLO>" -t 3000` then read `${DanNet.Q}`.
 - Reload the group only when nobody has an XTarget AND nobody is dead (`Me.State` HOVER/DEAD, or a name ending
-  "'s corpse" — a dead character also shows XTarget 0): `/dgae new_test /autoxp save`, then `/lua stop autoxp`, `/lua run autoxp`,
+  "'s corpse" — a dead character also shows XTarget 0) AND nobody is pulling or fighting (AutoXP state APPROACH /
+  FIGHT: a pull spell lands before the mob is on any XTarget — a reload then stopped every bot and the tank died): `/dgae new_test /autoxp save`, then `/lua stop autoxp`, `/lua run autoxp`,
   `/autoxp start` a few seconds apart (commands queued during a zone fire all at once and the run hits the old instance).
   Check each `autoxp_log_<Name>.txt` got a new `start:` line.
 - Never change a character's mode (or start / stop / travel) to make a calm window for a reload: the user sets

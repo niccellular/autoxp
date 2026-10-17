@@ -67,7 +67,7 @@ local R = {
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
     ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0, nukeLevel = 0, nukeDebuff = nil,
-    mobCast = {}, buffTry = {}, buffChecked = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {},
+    mobCast = {}, buffTry = {}, buffChecked = {}, songNext = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {},
 }
 -- one log per character: several clients run AutoXP at once
 local logf = io.open(mq.luaDir .. '/autoxp_log_' .. ME .. '.txt', 'a')
@@ -246,6 +246,7 @@ local function castFailed(spell, how)
     table.insert(f, now)
     while #f > 0 and now - f[1] > 30000 do table.remove(f, 1) end
     castFails[spell] = f
+    R.songNext[spell] = nil   -- an interrupted song didn't start its recast
     if R.cast and R.cast.id then
         R.rezzed[R.cast.id] = nil
         if R.cast.kind == 'cc' then R.mezzed[R.cast.id] = nil end
@@ -266,6 +267,14 @@ local function gemUp(name)
     return name ~= '' and not blocked(name) and mq.TLO.Me.Gem(name)() ~= nil and (tonumber(mq.TLO.Me.GemTimer(name)()) or 0) == 0
 end
 
+-- a spell for one kind of body: Undead (turn undead) or Summoned (Turn Summoned: constructs and elementals only)
+local function wrongBody(sp, s)
+    local tt, body = sp() and sp.TargetType() or '', s.Body.Name() or ''
+    if tt == 'Undead' then return not body:find('Undead') end
+    if tt == 'Summoned' then return not (body:find('Construct') or body:find('Elemental') or body:find('Summoned')) end
+    return false
+end
+
 -- start casting a gem spell on spawn id (self id for self/beneficial) and return; step() waits for it.
 -- kind 'heal' / 'cc' marks casts that are never ducked for a heal / a mez
 local function castOn(name, id, why, kind)
@@ -276,7 +285,7 @@ local function castOn(name, id, why, kind)
         local s = spawn(id)
         if not s or not s() or not s.LineOfSight() or (s.Distance3D() or 999) > (sp.MyRange() or sp.Range() or 200) then return false end
         if s.Type() == 'Corpse' and sp.TargetType() ~= 'Corpse' then return false end
-        if sp.TargetType() == 'Undead' and not (s.Body.Name() or ''):find('Undead') then return false end
+        if wrongBody(sp, s) then return false end
     end
     if not selfOnly and id and id > 0 and not targetId(id) then backoff(name, 'could not target', 5000); return false end
     if mq.TLO.Me.Sitting() then mq.cmd('/stand'); mq.delay(300) end
@@ -318,6 +327,7 @@ local function useAbility(a, id, why)
             local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
             if a.kind == 'skill' or not sp() or sp.TargetType() ~= 'Corpse' then return false end
         end
+        if a.kind ~= 'skill' and wrongBody(a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name), s) then return false end
     end
     if id and id > 0 and not targetId(id) then return false end
     if a.kind == 'skill' then mq.cmdf('/doability "%s"', a.name)
@@ -750,7 +760,24 @@ function hasBuff(name, s)
     return false
 end
 
+-- a buff the game refused ("Your X spell did not take hold on Y. (Blocked by Z.)") isn't cast again where Z is on:
+-- Stacks / StacksTarget can say yes while a better buff of its kind blocks it (Celerity under Exceptional Velocity).
+-- Learned from the first refusal of each pair, for this session
+local BLOCKEDBY = {}
+mq.event('axpBlocked', 'Your #1# spell did not take hold#*#(Blocked by #2#.)', function(_, spell, by)
+    BLOCKEDBY[spell] = BLOCKEDBY[spell] or {}
+    if not BLOCKEDBY[spell][by] then
+        BLOCKEDBY[spell][by] = true
+        log('%s is blocked by %s - not cast where that is on', spell, by)
+    end
+end)
+
 function buffStacks(name, onTarget)
+    for by in pairs(BLOCKEDBY[name] or {}) do
+        if onTarget and mq.TLO.Target.Buff(by)() or not onTarget and (mq.TLO.Me.Buff(by)() or mq.TLO.Me.Song(by)()) then
+            return false
+        end
+    end
     for _, part in ipairs(buffParts(mq.TLO.Spell(name))) do
         if (onTarget and part.StacksTarget() or not onTarget and part.Stacks()) then return true end
     end
@@ -1008,8 +1035,14 @@ local function doSongs()
     local calm = #hostiles() == 0 and R.state ~= 'FIGHT'
     for _, s in ipairs(list(calm and S.restSongs ~= '' and S.restSongs or S.songs)) do
         local sp = mq.TLO.Spell(s)
-        if sp() and not songUp(s) and spellReady(s) and ((sp.Mana() or 0) == 0 or mana() >= S.songManaMin or sp.Category() == 'Regen') then
-            if castOn(s, myId(), 'song') then return true end
+        if sp() and not songUp(s) and spellReady(s) and mq.gettime() >= (R.songNext[s] or 0)
+            and (mq.TLO.Me.CurrentMana() or 0) >= (sp.Mana() or 0)
+            and ((sp.Mana() or 0) == 0 or mana() >= S.songManaMin or sp.Category() == 'Regen') then
+            if castOn(s, myId(), 'song') then
+                -- a song whose recast outlasts it (Regar's Lively Crescendo: 30s, 45s recast) reads ready before it is
+                R.songNext[s] = mq.gettime() + (sp.MyCastTime() or 0) + (sp.RecastTime() or 0)
+                return true
+            end
         end
     end
     return false
@@ -1384,8 +1417,27 @@ local function doBurn(t)
 end
 
 -- out of combat: endurance discs below endPct, and long self buffs from abilities
-local doEndurance
+local doEndurance, stowCursor
 do   -- doMana stays out of the main chunk (LuaJIT allows it 200 locals)
+-- a summoned item left on the cursor (a Modulation Shard or mod rod from a group summon, a pet weapon) goes into the
+-- bags after 2s: with a full hand nothing can be memorized. Not while a trade, give, merchant or bank window is open;
+-- a mage's folded pack is left to the pet weapons (it is unfolded from the cursor)
+local STOWWND = { 'TradeWnd', 'GiveWnd', 'MerchantWnd', 'BigBankWnd' }
+function stowCursor()
+    local cur = mq.TLO.Cursor
+    local name = cur.Name()
+    if not name or name:find('^Folded Pack') or not (cur.NoRent() or name:find('^Summoned: ')) then R.cursorSeen = nil; return false end
+    for _, w in ipairs(STOWWND) do if mq.TLO.Window(w).Open() then return false end end
+    local now = mq.gettime()
+    if not R.cursorSeen or R.cursorSeen.name ~= name then R.cursorSeen = { name = name, at = now }; return false end
+    if now - R.cursorSeen.at < 2000 or now - (R.cursorAt or 0) < 10000 then return false end
+    R.cursorAt = now
+    mq.cmd('/autoinventory')
+    mq.delay(1000, function() return not mq.TLO.Cursor() end)
+    log(mq.TLO.Cursor() and 'no room in the bags for %s' or 'put %s in the bags', name)
+    return true
+end
+
 -- mana under 50%: a Modulation Shard from the bags (it trades health for mana: above 70% HP), else a Mana ability
 -- (Elemental Conversion; Summon Modulation Shard only when no shard is in the bags)
 local function doMana()
@@ -1670,6 +1722,7 @@ local function restoreGem()
     if not s then return false end
     if s.name == '' or mq.TLO.Me.Gem(s.g).Name() == s.name then R.swapGem = nil; return false end
     log('putting %s back in gem %d', s.name, s.g)
+    if mq.TLO.Cursor() then mq.cmd('/autoinventory'); mq.delay(1000, function() return not mq.TLO.Cursor() end) end   -- a full hand can't open the book
     mq.cmdf('/memspell %d "%s"', s.g, s.name)
     mq.delay(20000, function() return mq.TLO.Me.Gem(s.g).Name() == s.name or not quiet() end)
     if mq.TLO.Me.Gem(s.g).Name() == s.name then R.swapGem = nil end
@@ -1680,7 +1733,7 @@ end
 -- true when it did something; the same buff on the same target is retried after a minute at most
 local function tryBuff(b, id, why)
     local key = id .. '|' .. b
-    if mq.gettime() - (R.buffTry[key] or 0) < 60000 then return false end
+    if blocked(b) or mq.gettime() - (R.buffTry[key] or 0) < 60000 then return false end
     if spellReady(b) then
         R.buffTry[key] = mq.gettime()
         local tt = mq.TLO.Spell(b).TargetType() or ''
@@ -1699,6 +1752,7 @@ local function tryBuff(b, id, why)
             R.swapGem = swap
         end
         log('memorizing %s in gem %d to buff', b, swap.g)
+        if mq.TLO.Cursor() then mq.cmd('/autoinventory'); mq.delay(1000, function() return not mq.TLO.Cursor() end) end   -- a full hand can't open the book
         mq.cmdf('/memspell %d "%s"', swap.g, b)
         mq.delay(20000, function() return mq.TLO.Me.Gem(swap.g).Name() == b or not quiet() end)
         swap.at = mq.gettime()
@@ -1805,7 +1859,7 @@ end
 -- handed out best first. The pouch is destroyed once it's empty (leftover weapons wait for the next pet)
 local doPetWeapons, petsToArm
 do   -- its helpers stay out of the main chunk (LuaJIT allows it 200 locals)
-local WEAPONPREF = { 'Fireblade', 'Iceblade', 'Ragesword', 'Mindblade', 'Shortsword' }
+local WEAPONPREF = { 'Fireblade', 'Iceblade', 'Ragesword', 'Rageblade', 'Mindblade', 'Shortsword' }
 local function petWeapons()
     local found = {}
     for i = 23, 34 do
@@ -1813,7 +1867,11 @@ local function petWeapons()
         for j = 1, (b() and b.Container() or 0) do
             local n = b.Item(j)() and b.Item(j).Name() or ''
             if n:find('^Summoned: ') then
-                for k, w in ipairs(WEAPONPREF) do if n:find(w) then table.insert(found, { name = n, rank = k }); break end end
+                local rank, t = nil, b.Item(j).Type() or ''
+                for k, w in ipairs(WEAPONPREF) do if n:find(w) then rank = k; break end end
+                -- any other summoned weapon comes last (a grant's weapon names change with its rank)
+                if not rank and (t:find('^[12]H') or t == 'Piercing' or t == 'Hand to Hand') then rank = #WEAPONPREF + 1 end
+                if rank then table.insert(found, { name = n, rank = rank }) end
             end
         end
     end
@@ -3449,6 +3507,7 @@ while not R.terminate do
     local pok, perr = pcall(peersTick)
     if not pok and perr ~= R.peerErr then R.peerErr = perr; log('group view error: %s', tostring(perr)) end
     if R.running and not R.paused then
+        pcall(stowCursor)
         local ok, err = pcall(step)
         if not ok then log('error: %s', tostring(err)); stopAll('error') end
     end
