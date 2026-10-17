@@ -37,6 +37,12 @@ MacroQuest Lua leveling automation (`init.lua`, `zones.lua`). Private repo nicce
   counts every local live at one point, so a `do … end` block's locals add to the top-level ones above it; they're
   freed after the block. Keep a feature's tables and helpers in a block and expose only what's used outside
   (see the buff helpers, `doPetWeapons`, the UI block).
+- Some native lookups fault instead of returning nil and end the script with no Lua error ("Abnormal exception thrown
+  from coroutine!"): `Spawn.MyBuff` and `Spell.Trigger` on some Luclin mobs / trigger spells. On a mob, track what
+  AutoXP cast itself (`R.mobCast`). To find such a fault, write a breadcrumb file each step (last step before it dies).
+- The ImGui callback can't yield: nothing that calls `mq.delay` (e.g. `scanAbilities`) from a button — set a flag
+  and run it in the main loop. An error between `BeginChild` / `EndChild` gives "Missing EndChild()", which pauses
+  ImGui and ends the script: the error path closes the child.
 - A dead group member's slot points at their corpse (`Type() == 'Corpse'`) — skip it for heals and buffs.
 - Find Window: `/windowstate FindLocationWnd open` makes the server send the zone's list; read
   `Window('FindLocationWnd').Child('FLW_FindLocationList').List(row, 1)` = category ("Quests", "Zone Connection",

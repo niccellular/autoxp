@@ -19,8 +19,8 @@ end
 local ME = ((mq.TLO.Me.CleanName() or 'default'):gsub("'s corpse%d*$", ''))
 local CONFIG = string.format('%s/autoxp_%s.lua', mq.configDir, ME)
 local MODES = { 'Manual', 'Hunter', 'Assist', 'Chase' }
-local ROLES = { 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Pull' }
-local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Pull' }
+local ROLES = { 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pull' }
+local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pull' }
 
 -- settings (persisted) -------------------------------------------------------------------
 local S = {
@@ -444,6 +444,11 @@ local function classify(name, kind)
 
     if fx[74] then return 'Off' end                                   -- feign death: only to shed aggro (doShed)
     if fx[26] or fx[83] or fx[88] or fx[104] or fx[145] then return 'Off' end   -- gate / teleport / evac: never automatic
+    do   -- gives mana (Elemental Conversion, Summon Modulation Shard): used when mana runs low
+        local d = (sp.Description() or ''):lower()
+        if kind ~= 'disc' and not off and d:find('mana') and (d:find('restore') or d:find('return'))
+            and not (self and (fx[0] or 0) < 0) then return 'Mana' end
+    end
     if tt:find('^Pet') then return 'Off' end                          -- pet abilities aren't handled
     if pos(92) or pos(192) or pos(114) or fx[444] or is('Hatred') then return 'Tank' end
     if self and (fx[0] or 0) < 0 then return 'Off' end               -- costs your own health (HP -> mana)
@@ -516,9 +521,10 @@ local ABILUSE = {
     CC = 'Interrupting a casting mob and stunning adds.', Buff = 'Kept up out of combat.',
     Debuff = 'Debuff duty: once per mob, before the Debuffs list (malo on adds waiting for a mez first).',
     Endurance = 'Out of combat when endurance is under the endurance %.', Pull = 'As the pull method.',
+    Mana = 'When your mana is under 50%, in or out of combat (a Modulation Shard only when none is in the bags).',
 }
 
-local ABILVER = 8   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
+local ABILVER = 10   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
 local function scanAbilities()
     local found, seen, oldPos = {}, {}, {}
     for i, old in ipairs(S.abilities) do oldPos[old.name] = i end
@@ -769,7 +775,10 @@ function refreshBuffs()
             if b.Subcategory() == 'Resist Buff' then
                 for spa = 46, 50 do if b.HasSPA(spa)() then key = key .. '/' .. spa end end
             end
-            if not best[key] or (b.Level() or 0) > best[key].lvl then best[key] = { name = b.Name(), lvl = b.Level() or 0 } end
+            -- a group version within 10 levels of the best one wins: one cast buffs everybody
+            local grp = (b.TargetType() or ''):find('^Group') ~= nil
+            local rank = (b.Level() or 0) + (grp and 10 or 0)
+            if not best[key] or rank > best[key].rank then best[key] = { name = b.Name(), lvl = b.Level() or 0, rank = rank } end
         end
     end
     local out, unity = {}, {}
@@ -1216,18 +1225,11 @@ local function doTank(t)
     return false
 end
 
--- my spell is still on the mob: it (or a spell it triggers) shows on the target, or I cast it on this mob
--- in the last 15s (resisted, or not listed yet)
+-- whether my spell is on the mob: AutoXP's own record of what it cast where (the spell's duration, 15s to 2 min;
+-- a resist clears it). Never Spawn.MyBuff / Spell.Trigger here: on some Luclin mobs and trigger spells those native
+-- lookups fault and kill the script ("Abnormal exception thrown from coroutine!")
 local function onMob(t, name)
-    if t.MyBuff(name)() then return true end
-    local sp = mq.TLO.Spell(name)
-    if (sp.Duration.TotalSeconds() or 0) == 0 then
-        for i = 1, (sp.NumEffects() or 0) do
-            local tr = sp.Trigger(i)
-            if tr() and t.MyBuff(tr.Name())() then return true end
-        end
-    end
-    return mq.gettime() < (R.mobCast[t.ID() .. '|' .. name] or 0)
+    return mq.gettime() < (R.mobCast[(t.ID() or 0) .. '|' .. name] or 0)
 end
 
 -- counted as on the mob for its duration (15s to 2 min) when the buff can't be seen; a resist clears it
@@ -1241,18 +1243,30 @@ end
 local DEB = {}   -- debuff helpers (one table: the main chunk is near LuaJIT's 200-local limit)
 -- my debuffs: the Debuff abilities first (Malaise, Sha's Reprisal...: instant), then the Debuffs list. Each has a kind
 -- (malo, slow, cripple) and a mob gets one of each kind - an ability on cooldown falls back to the spell
+-- the kind from the spell's own category and effects - never by following its triggers (that native lookup can fault);
+-- a debuff that only casts another spell (Wind of Malaise) is told by its name
 function DEB.kind(sp)
     local sub = sp.Subcategory() or ''
-    local fx = spellFx(sp)
-    for spa = 46, 50 do if (fx[spa] or 0) < 0 then return 'malo' end end
     if sub == 'Resist Debuffs' then return 'malo' end
-    if sub == 'Slow' or (fx[11] and fx[11] < 100) then return 'slow' end
+    if sub == 'Slow' then return 'slow' end
     if sub == 'Disempowering' then return 'cripple' end
+    for i = 1, (sp.NumEffects() or 0) do
+        local at, b = sp.Attrib(i)(), sp.Base(i)() or 0
+        if at and at >= 46 and at <= 50 and b < 0 then return 'malo' end
+        if at == 11 and b < 100 then return 'slow' end
+    end
+    local n = (sp.Name() or ''):lower()
+    if n:find('mala') or n:find('malo') or n:find('tash') then return 'malo' end
+    if n:find('slow') or n:find('reprisal') or n:find('drows') or n:find('languid') then return 'slow' end
+    if n:find('crippl') or n:find('incapacit') then return 'cripple' end
     return sub
 end
 
 function DEB.list()
-    if R.dlist and mq.gettime() - R.dlistAt < 5000 then return R.dlist end
+    local sig = S.debuffs
+    for _, a in ipairs(abilitiesFor('Debuff')) do sig = sig .. '|' .. a.name end
+    if R.dlist and R.dlistSig == sig then return R.dlist end
+    R.dlistSig = sig
     local out = {}
     for _, a in ipairs(abilitiesFor('Debuff')) do
         local sp = abilitySpell(a)
@@ -1283,15 +1297,18 @@ end
 local function doDebuff(t)
     if not S.debuff then return false end
     local mobs = {}
-    if alive(t) and (t.PctHPs() or 0) > 40 then table.insert(mobs, t) end
+    local tid = alive(t) and t.ID() or 0
+    if tid > 0 and (t.PctHPs() or 0) > 40 then table.insert(mobs, t) end
     for _, x in ipairs(hostiles()) do
-        if x.ID() ~= (alive(t) and t.ID() or 0) and (x.PctHPs() or 0) > 40 and x.LineOfSight() then table.insert(mobs, x) end
+        local xid = x.ID() or 0
+        if xid ~= tid and (x.PctHPs() or 0) > 40 and x.LineOfSight() then table.insert(mobs, x) end
     end
     local dl = DEB.list()
     for _, m in ipairs(mobs) do
-        local asleep = m ~= t and mezzed(m)
+        local mid = m.ID() or 0
+        local asleep = mid ~= tid and mezzed(m)
         for _, e in ipairs(dl) do
-            if not DEB.has(m, dl, e.kind) and not (asleep and e.dmg) and DEB.on(m, e, m == t and 'debuff' or 'debuff add') then return true end
+            if not DEB.has(m, dl, e.kind) and not (asleep and e.dmg) and DEB.on(m, e, mid == tid and 'debuff' or 'debuff add') then return true end
         end
     end
     return false
@@ -1367,13 +1384,35 @@ local function doBurn(t)
 end
 
 -- out of combat: endurance discs below endPct, and long self buffs from abilities
-local function doEndurance()
+local doEndurance
+do   -- doMana stays out of the main chunk (LuaJIT allows it 200 locals)
+-- mana under 50%: a Modulation Shard from the bags (it trades health for mana: above 70% HP), else a Mana ability
+-- (Elemental Conversion; Summon Modulation Shard only when no shard is in the bags)
+local function doMana()
+    if (mq.TLO.Me.MaxMana() or 0) == 0 or mana() >= 50 or casting() then return false end
+    local shard = mq.TLO.FindItem('Modulation Shard')
+    if shard() and hp() > 70 and (shard.TimerReady() or 0) == 0 and mq.gettime() - (R.shardAt or 0) > 3000 then
+        R.shardAt = mq.gettime()
+        mq.cmdf('/useitem "%s"', shard.Name())
+        log('click %s (mana %d%%)', shard.Name(), mana())
+        return true
+    end
+    for _, a in ipairs(abilitiesFor('Mana')) do
+        if not (a.name:find('Modulation Shard') and shard()) and useAbility(a, nil, string.format('mana %d%%', mana())) then return true end
+    end
+    return false
+end
+
+function doEndurance()
+    if doMana() then return true end
     if #hostiles() > 0 or (mq.TLO.Me.PctEndurance() or 100) >= S.endPct then return false end
     for _, a in ipairs(abilitiesFor('Endurance')) do
         if not abilityUp(a) and useAbility(a, nil, 'endurance') then return true end
     end
     return false
 end
+end
+
 
 local function doAbilityBuffs()
     if #hostiles() > 0 then return false end
@@ -1403,7 +1442,8 @@ local function doMalo()
     local tank = mq.TLO.Me.GroupAssistTarget.ID() or 0
     local dl = DEB.list()
     for _, x in ipairs(adds) do
-        if x.ID() ~= R.targetId and x.ID() ~= tank and (x.PctHPs() or 0) > 40 and x.LineOfSight() and not DEB.has(x, dl, 'malo') then
+        local xid = x.ID() or 0
+        if xid ~= R.targetId and xid ~= tank and (x.PctHPs() or 0) > 40 and x.LineOfSight() and not DEB.has(x, dl, 'malo') then
             for _, e in ipairs(dl) do
                 if e.kind == 'malo' and not (mezzed(x) and e.dmg) and DEB.on(x, e, 'malo for mez') then return true end
             end
@@ -1687,7 +1727,7 @@ local function doBuffs()
             local m = mq.TLO.Group.Member(i)
             local id = m.ID() or 0
             if id > 0 and m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse' and (m.Distance() or 999) < 100 and m.LineOfSight()
-                and mq.gettime() - (R.buffChecked[id] or 0) > 60000 then
+                and mq.gettime() - (R.buffChecked[id] or 0) > 30000 then
                 local mcls, want = m.Class.ShortName() or '', {}
                 for _, b in ipairs(buffs) do
                     if usable(b) and mq.TLO.Spell(b).TargetType() ~= 'Self' and wantsBuff(mcls, buffWho(b), false) then table.insert(want, b) end
@@ -1922,6 +1962,8 @@ end
 -- Rez duty: resurrect group members' corpses in range and sight. In a fight only Call of the Wild, on someone still
 -- dead (back with no exp; an exp rez still works later). Out of combat a rez AA that returns exp, else the best rez
 -- spell in the book (memorized into a borrowed gem if needed) - once per corpse (it stays after the rez)
+local doRez
+do   -- its tables stay out of the main chunk (LuaJIT allows it 200 locals)
 local REZAA = { 'Blessing of Resurrection', 'Rejuvenation of Spirit', 'Divine Resurrection' }
 local COMBATREZ = { 'Call of the Wild' }
 local function rezSpell()
@@ -1938,14 +1980,32 @@ local function rezSpell()
     return R.rezName
 end
 
-local function doRez()
+function doRez()
     if not S.rez then return false end
     local fight = #hostiles() > 0
+    local who = {}
     for i = 1, (mq.TLO.Group.Members() or 0) do
         local m = mq.TLO.Group.Member(i)
-        local name = m.Name()
-        local c = name and mq.TLO.Spawn('pccorpse ' .. name .. "'s corpse")
-        if c and c() and not R.rezzed[c.ID()] and (not fight or m.Type() == 'Corpse') and (c.Distance3D() or 999) < 100 and c.LineOfSight() then
+        if m.Name() then table.insert(who, { name = m.Name(), dead = m.Type() == 'Corpse' }) end
+    end
+    -- my own corpse too, out of combat: resurrecting it wins the experience back (walking to it first)
+    if not fight then table.insert(who, { name = ME, me = true }) end
+    R.corpseSkip = R.corpseSkip or {}
+    for _, w in ipairs(who) do
+        local name = w.me and 'my corpse' or w.name
+        local c = mq.TLO.Spawn('pccorpse ' .. w.name .. "'s corpse")
+        local cid = c and c() and c.ID() or 0
+        local near = cid > 0 and (c.Distance3D() or 999) < 100 and c.LineOfSight()
+        if w.me and cid > 0 and not near and not R.rezzed[cid] and (R.corpseSkip[cid] or 0) < mq.gettime() then
+            if (mq.TLO.Navigation.PathLength('id ' .. cid)() or -1) < 0 then
+                R.corpseSkip[cid] = mq.gettime() + 60000   -- no path to it: look again in a minute
+            else
+                if not mq.TLO.Navigation.Active() then mq.cmdf('/nav id %d distance=20', cid) end
+                if R.corpseWalk ~= cid then R.corpseWalk = cid; log('walking to my corpse to resurrect it') end
+                return true
+            end
+        end
+        if near and not R.rezzed[cid] and (not fight or w.dead) then
             local key = c.ID() .. '|rez'
             for _, n in ipairs(fight and COMBATREZ or REZAA) do
                 if mq.TLO.Me.AltAbilityReady(n)() and mq.gettime() - (R.buffTry[key] or 0) > (fight and 10000 or 60000) and targetId(c.ID()) then
@@ -1969,6 +2029,7 @@ local function doRez()
         end
     end
     return false
+end
 end
 
 local function engage(id)
@@ -2019,10 +2080,13 @@ end
 -- reasons not to pull yet: resurrection sickness (mine or a group member's), a dead or missing member,
 -- a healer or CC class under "Rest below %" mana
 local SICK = { 'Resurrection Sickness', 'Revival Sickness' }
-local HEALCC = { CLR = true, DRU = true, SHM = true, ENC = true, BRD = true }
+-- classes the Hunter waits for (mana under the rest %): healers, CC and the nukers (a nuker out of mana stops nuking)
+local HEALCC = { CLR = true, DRU = true, SHM = true, ENC = true, BRD = true, MAG = true, WIZ = true, NEC = true }
 local function pullHold(travel)
     for _, b in ipairs(SICK) do if mq.TLO.Me.Buff(b)() then return 'I have ' .. b end end
     if hp() < S.restPct then return string.format('I am at %d%% HP', hp()) end
+    local buffer = DPS.peerBuffing and DPS.peerBuffing()
+    if buffer then return buffer .. ' is buffing' end
     for i = 1, (mq.TLO.Group.Members() or 0) do
         local m = mq.TLO.Group.Member(i)
         local name = m.Name() or '?'
@@ -2369,6 +2433,7 @@ local function fightTick()
     if doShed(t) then return end
     if doDuties(t) then return end
     if doBurn(t) then return end
+    if doEndurance() then return end   -- in a fight only its mana part acts (shard, Mana abilities)
     if doDps(t) then return end
     if inState() > 300000 then log('fight timeout'); attackOff(); R.pickId = 0; setState('FIND') end
 end
@@ -2468,6 +2533,11 @@ local function step()
         if doRez() then return end
         if doEndurance() then return end
         if petsToArm() then setState('BUFF'); return end
+        -- group buffs come before the next pull: idle with nothing around, go buff (a member every 30s at most)
+        if #hostiles() == 0 and mq.gettime() - (R.idleBuffAt or 0) > 5000 then
+            R.idleBuffAt = mq.gettime()
+            setState('BUFF'); return
+        end
         chaseFollow()
         if #hostiles() == 0 and (hp() < S.restPct or manaLow()) then
             local lead = S.mode == 'Chase' and leadSpawn() or nil
@@ -2977,6 +3047,20 @@ do
     end
 
     -- HUD: a small see-through window with my DPS and session stats; right-click for Reset stats / Hide HUD
+    -- a groupmate casting in its BUFF state (from its ${AutoXP} status), for up to 60s each - the Hunter waits for it
+    function DPS.peerBuffing()
+        local now = mq.gettime()
+        R.buffHold = R.buffHold or {}
+        for _, r in ipairs(P.rows) do
+            if not r.me and r.d and r.fresh and r.d.state == 'BUFF' and r.d.cast ~= '' and r.d.run == 'run' then
+                R.buffHold[r.name] = R.buffHold[r.name] or now
+                if now - R.buffHold[r.name] < 60000 then return r.name end
+            else
+                R.buffHold[r.name] = nil
+            end
+        end
+    end
+
     function DPS.drawHud()
         if not S.showHud then return end
         ImGui.SetNextWindowBgAlpha(0.6)
@@ -3136,6 +3220,7 @@ function draw()
 
         -- only the tabs scroll: the status above and the Save button below stay in view
         ImGui.BeginChild('##tabs', 0, -ImGui.GetFrameHeightWithSpacing(), false)
+        R.inChild = true
         if ImGui.BeginTabBar('tabs') then
             if ImGui.BeginTabItem('General') then
                 local zi = zoneInfo(S.zone)
@@ -3235,7 +3320,7 @@ function draw()
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem('Abilities') then
-                if ImGui.Button('Scan class abilities') then scanAbilities() end
+                if ImGui.Button('Scan class abilities') then R.wantScan = true end
                 tip('Reads skills, disciplines and class AAs and sorts them by what their spells do.\nRoles you pick yourself are kept on a rescan; older ranks of a line are set Off.')
                 ImGui.SameLine(); ImGui.Text(string.format('%d found', #S.abilities))
                 ImGui.SameLine()
@@ -3301,10 +3386,14 @@ function draw()
             end
             ImGui.EndTabBar()
         end
+        R.inChild = false
         ImGui.EndChild()
         if ImGui.Button('Save settings') then save(); log('settings saved') end
         end)
-        if not okBody then oops('window', errBody) end
+        if not okBody then
+            oops('window', errBody)
+            if R.inChild then R.inChild = false; ImGui.EndChild() end
+        end
     end
     ImGui.End()
     local okP, errP = pcall(drawPeers)
@@ -3322,7 +3411,7 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif cmd == 'pause' then setPaused(true) elseif cmd == 'resume' then setPaused(false)
     elseif cmd == 'spells' then startSpellScan(); log('checking spell book...')
     elseif cmd == 'burn' then R.burnUntil = mq.gettime() + 60000; log('burn: manual, 60s')
-    elseif cmd == 'show' then R.open = true elseif cmd == 'scan' then scanAbilities() elseif cmd == 'save' then save(); log('settings saved')
+    elseif cmd == 'show' then R.open = true elseif cmd == 'scan' then R.wantScan = true elseif cmd == 'save' then save(); log('settings saved')
     elseif cmd == 'mode' and a1 then
         for _, m in ipairs(MODES) do if m:lower() == a1:lower() then S.mode = m; log('mode %s', m) end end
     elseif cmd == 'role' and a1 and (a1:lower() == 'tank' or a1:lower() == 'dps') then S.role = a1:lower() == 'tank' and 'Tank' or 'DPS'; log('role %s', S.role)
@@ -3346,6 +3435,11 @@ while not R.terminate do
     if not SP.scanning and SP.done and (mq.TLO.Me.Level() or 0) ~= SP.level then pcall(startSpellScan) end
     local sok, serr = pcall(stepSpellScan)
     if not sok then log('spell scan error: %s', tostring(serr)); SP.scanning = false end
+    if R.wantScan then
+        R.wantScan = false
+        local ok, err = pcall(scanAbilities)
+        if not ok then log('scan failed: %s', tostring(err)) end
+    end
     local eok, eerr = pcall(mq.doevents)
     if not eok then oops('event', eerr) end
     local dok, derr = pcall(DPS.tick)
