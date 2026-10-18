@@ -26,22 +26,31 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 
 ## What it does
 
-- **Modes:** Hunter (finds mobs in a level range and radius), Assist, Chase, Manual.
+- **Modes:** Hunter (finds mobs in a level range and radius), Assist, Chase, Manual. The hunt zone is the zone the
+  character is in whenever AutoXP starts or Hunter is switched on; picking another in the window while running
+  travels there (and `/lua run autoxp <zone>` travels there on the first start).
 - **Role:** Tank (front, taunt, stun-lock, target priority, keeps mobs in front) or DPS (behind or at range).
   Duties are separate toggles: Heal, CC, Debuff, Nuke, DoT, Buff, Rez (e.g. a healer can opt out of nukes or DoTs).
   **Backup** (backup tank): while the group main tank is dead or out of the zone, this character tanks in its place
   (Tank role), and goes back to its own role once the main tank is alive and the fight is over.
   Non-tanks in Chase / Assist join a pulled mob once it has reached the main tank (or after 6s), so they don't
   pull it off the tank on the way in.
-- **Class setup:** scans skills, disciplines and class AAs; fills spell lists from memorized gems (heals, stuns, nukes,
-  DoTs, slows, mez, pet, buffs); casters and priests fight from range.
+- **Class setup:** scans skills, disciplines and class AAs; fills spell lists from memorized gems (heals, stuns and hate
+  spells, nukes and lifetaps, DoTs, slows, mez, mana spells, pet, buffs); casters and priests fight from range.
+  A list you edit (Spells / Healing tabs, or the settings file's `userLists`) stays as you wrote it when the gems
+  change; "Fill from memorized gems" refills them all.
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
   walking distance, and holds pulls while anyone is under "Rest below %" HP, a healer, CC or nuker (CLR, DRU, SHM,
-  ENC, BRD, MAG, WIZ, NEC) is under it in mana, or a groupmate is casting its buffs (up to 60s each).
+  ENC, BRD, MAG, WIZ, NEC) is under it in mana, a groupmate is casting its buffs (up to 60s each; a bard's songs
+  don't count) or a groupmate is walking to or resurrecting a corpse (up to 3 minutes each).
   NPCs listed in the zone's Find Window (quest givers, merchants, bankers) are never hunted.
 - **Movement:** 3D distance and line of sight; navigates on the mesh instead of sticking through walls or floors.
-- **Spells:** memorizes higher-level versions of memorized spells out of combat; lists missing spells for your level.
+  It goes to a mob like `/nav target` (the whole path, re-pathed as the mob moves) and stops itself once the mob is
+  in range, in sight and on its floor.
+- **Spells:** memorizes higher-level versions of memorized spells out of combat (never over a spell in a list you
+  edited, never a second rank of a line already memorized); lists missing spells for your level. A spell whose
+  reagent isn't in the bags is skipped (logged once).
   Healers (Heal duty) keep the two best direct single-target heals and the two best heals-over-time memorized.
 - **CC duty:** mezzes adds as soon as they show up (in any state, right after heals) and never the tank's target.
   Two or more awake adds around the caster take the AE mez (bards: Wave of ..., kept memorized; a nuke's gem is
@@ -53,18 +62,34 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   Debuff abilities (role Debuff: Malaise, Wind of Malaise, Sha's Reprisal...) go before the Debuffs list, and a mob
   gets one of each kind (malo, slow, cripple). Who debuffs is per character: turn Debuff off on a healer to keep it
   healing (e.g. the mage malos, the beastlord slows, the shaman heals).
-- **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically).
+- **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically; passive AAs and
+  run-speed ones are Off; an AA that can't be kept up is a burn, not a buff). Per ability in the settings file:
+  `excl = '<tag>'` makes abilities with that tag take turns (the next only once the earlier ones are used and faded),
+  `notWith = 'A, B'` skips it while a buff starting with A or B is on you.
+- **Fights:** burns on any named on the extended target list; a discipline that lasts waits for the running one.
+  A detrimental AE (PB, targeted, directional) only goes off with 2+ mobs on XTarget, no mezzed one in its reach and
+  no idle NPC there. Named mobs are never mezzed, and keep their DoTs and debuffs down to 5%. The tank casts its hate
+  spells when its aggro slips. Tank buffs (a list) are kept on the group main tank in fights (a mage's short damage
+  shields), recast when your cast of it runs out.
+- **Invisibility:** while invisible and not in a fight (nothing on the extended target list, not pulling or
+  engaging), no casts, abilities, songs, item clicks, buffs or rezzes: a bard's group invis lasts the trip.
+- **Bards:** in a fight the abilities go first (MQ2Bard's order: Fierce Eye, Kick, the burns, Bellow), then the next
+  song in the Songs list. Songs are sung on the move: following, closing in and melee carry on during a song, and a
+  group or self song keeps the fight target.
 - **Buff duty:** self, group and pet buffs; each group member in range is checked every 30s, and a group version
   within 10 levels of the best single-target one wins (one cast buffs everybody). Idle with nothing around, the
   buffers go over their buffs before the next pull. A buff the game refuses ("Blocked by" a better one) isn't
   cast again on anyone who has that better buff.
-- **Mana:** under 50% mana, in or out of combat, clicks a Modulation Shard from the bags (above 70% HP), else uses
-  a Mana ability (role Mana: Elemental Conversion; Summon Modulation Shard only when none is in the bags).
+- **Mana:** under the mana-tools % (default 50), in or out of combat, clicks a Modulation Shard from the bags (above
+  70% HP), else uses a Mana ability (role Mana: Elemental Conversion, Cannibalization; Summon Modulation Shard only
+  when none is in the bags), else a Mana spell (Gather Zeal, Traumatic Exchange). One that costs health keeps 20% HP
+  back (30% in a fight).
 - **Cursor:** a summoned item left on the cursor (Modulation Shard, mod rod, pet weapon) goes into the bags after 2s
   (with a full hand nothing can be memorized); never while a trade, give, merchant or bank window is open.
 - **Rez duty:** in a fight only Call of the Wild (no exp, on someone still dead); out of combat an exp rez AA or
-  the best rez spell, once per corpse. Out of combat a character with a rez also resurrects its own corpse, walking
-  to it on the mesh first.
+  the best rez spell, once per corpse (remembered for 3 hours across reloads). Out of combat it walks on the mesh to
+  any group member's corpse in the zone (and its own), giving up on one after 90s; the Hunter tank holds its pulls
+  meanwhile.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty.
 - **Group window:** one row per DanNet peer running AutoXP — HP / mana / endurance, AutoXP state, target, status

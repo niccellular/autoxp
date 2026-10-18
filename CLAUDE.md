@@ -28,6 +28,7 @@ MacroQuest Lua leveling automation (`init.lua`, `zones.lua`). Private repo nicce
 - A living mob can read `PctHPs` 0 and a fresh corpse can read 3% — death is `Type() == 'Corpse'`, never HP%.
 - A bard keeps `Me.Casting` set while it holds a song: for bards "busy" is `Window('CastingWindow').Open()`,
   and a new song needs `/stopsong` first. While any spell casts, every gem reads not-ready: use `Me.GemTimer(name)`.
+  A bard's `Me.SpellReady` reads true while any song plays (even on recast): bards go by `Me.GemTimer(name)` only.
 - `/assist` can switch auto-attack on (game option). Followers read `Me.GroupAssistTarget` (the group MA's target) instead.
 - Unity spells last ~6s and cast the real buffs (`Spell.Trigger(i)`); judge them by what they trigger.
   SPA 470 triggers resolve only on a character who knows the spell line.
@@ -71,5 +72,7 @@ MacroQuest Lua leveling automation (`init.lua`, `zones.lua`). Private repo nicce
   FIGHT: a pull spell lands before the mob is on any XTarget — a reload then stopped every bot and the tank died): `/dgae new_test /autoxp save`, then `/lua stop autoxp`, `/lua run autoxp`,
   `/autoxp start` a few seconds apart (commands queued during a zone fire all at once and the run hits the old instance).
   Check each `autoxp_log_<Name>.txt` got a new `start:` line.
+- Settings files are rewritten every 15s by a running AutoXP: edit `config/autoxp_<Name>.lua` only while that
+  client's AutoXP is stopped (save, `/lua stop autoxp`, edit, `/lua run autoxp`, start), all inside one calm window.
 - Never change a character's mode (or start / stop / travel) to make a calm window for a reload: the user sets
   modes on purpose (a "restored" Hunter once travelled the tank off alone and got him killed). Wait, or ask.
