@@ -33,7 +33,7 @@ local S = {
     nukes = '', nukeManaMin = 30, dotManaMin = 40, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
     combatBuffs = 'Yaulp', stunCooldown = true, keepInFront = true,
     avoidMobs = true, avoidRadius = 100, pullVer = 0, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
-    style = 'Auto', castRange = 100, mez = '', dots = '', debuffs = '', petSpell = '', usePet = true, class = '',
+    style = 'Auto', castRange = 100, mez = '', dots = '', twincastNukes = '', itNukes = '', debuffs = '', petSpell = '', usePet = true, shrinkPet = true, class = '',
     songs = '', restSongs = '', songManaMin = 10, fillVer = 0, swapGem = false,
     tankBuffs = '', manaSpells = '', manaPct = 50, userLists = {}, rezDone = {},
     defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true, burnCount = 5,
@@ -68,7 +68,7 @@ local R = {
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
     ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0, nukeLevel = 0, nukeDebuff = nil,
-    mobCast = {}, buffTry = {}, buffChecked = {}, songNext = {}, abilUsed = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {}, tankBuffUntil = {}, reagentNote = {},
+    mobCast = {}, buffTry = {}, buffChecked = {}, songNext = {}, abilUsed = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, diedAt = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {}, tankBuffUntil = {}, reagentNote = {},
 }
 -- one log per character: several clients run AutoXP at once
 local logf = io.open(mq.luaDir .. '/autoxp_log_' .. ME .. '.txt', 'a')
@@ -204,10 +204,15 @@ local function attackOff()
     R.attacking = false
 end
 
+-- the swarm pets (Ravening Servant, Chattering Bones, Spirit Call) go with it: /pet swarm with the attack, and again 5s
+-- later for the ones summoned since
 local function doPet(t)
     if not S.usePet or (mq.TLO.Me.Pet.ID() or 0) == 0 then return false end
     if alive(t) and R.petTarget ~= t.ID() and targetId(t.ID()) then
-        mq.cmd('/pet attack'); R.petTarget = t.ID(); log('pet attack %s', t.CleanName())
+        mq.cmd('/pet attack'); mq.cmd('/pet swarm'); R.petTarget, R.swarmAt = t.ID(), mq.gettime() + 5000
+        log('pet attack %s', t.CleanName())
+    elseif R.swarmAt and mq.gettime() >= R.swarmAt and alive(t) and R.petTarget == t.ID() and mq.TLO.Target.ID() == t.ID() then
+        mq.cmd('/pet swarm'); R.swarmAt = nil
     end
     return false
 end
@@ -332,10 +337,20 @@ local function readyNow(a)
     return false
 end
 
+-- a shield block (SPA 320: Deflection Discipline, Shield Flash) needs a shield in the off hand. Looked at on every use,
+-- so swapping to a two-hander and back is followed (Ramakrr fights with nothing in the off hand)
+FIGHT.shieldNeed = {}
+function FIGHT.noShield(name, sp)
+    local need = FIGHT.shieldNeed[name]
+    if need == nil then need = (sp and sp() and sp.HasSPA(320)() == true) or false; FIGHT.shieldNeed[name] = need end
+    return need and mq.TLO.Me.Inventory('offhand').Type() ~= 'Shield'
+end
+
 local function abilityReady(a)
     if blocked(a.name) or not readyNow(a) or (R.abilNext[a.name] or 0) > mq.gettime() then return false end
     if a.kind == 'skill' then return true end
     local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
+    if FIGHT.noShield(a.name, sp) then return false end
     -- its endurance and its mana (Rallying Call costs 25000 of each: at 16% mana it "did not fire" every 20s)
     return not sp() or ((sp.EnduranceCost() or 0) <= (mq.TLO.Me.CurrentEndurance() or 0)
         and (sp.Mana() or 0) <= (mq.TLO.Me.CurrentMana() or 0))
@@ -573,6 +588,7 @@ end
 local function abilityStatus(a)
     local back = (failedUntil[a.name] or 0) - mq.gettime()
     if back > 0 then return 'backed off', 'AutoXP tried it and it did not fire - waiting before the next try', math.ceil(back / 1000) end
+    if a.kind ~= 'skill' and FIGHT.noShield(a.name, abilitySpell(a)) then return 'blocked', 'Needs a shield in the off hand', 0 end
     if readyNow(a) then return 'ready', 'Ready to use now', 0 end
     local cd = abilityCooldown(a)
     if cd > 0 then return 'cooldown', 'On cooldown (ranks of one line share it)', cd end
@@ -1581,17 +1597,32 @@ function FIGHT.noReagent(sp)
             return true
         end
     end
+    -- and one it needs but doesn't use up (Goblin Skin's Pearl: memorized, "You are missing Pearl", once a minute)
+    for i = 1, 4 do
+        local id = sp.NoExpendReagentID(i)()
+        if id and id > 0 and (mq.TLO.FindItemCount(id)() or 0) < 1 then
+            local n = sp.Name() or '?'
+            if not R.reagentNote[n] then R.reagentNote[n] = true; log('not casting %s: it needs item %d in the bags', n, id) end
+            return true
+        end
+    end
     return false
 end
 
--- in a fight: my combat buffs (not under a better one the game said blocks it: Twincast under Improved Twincast), then
--- tank buffs on the group main tank (a mage's Igneous Veil and Boiling Skin, a shaman's Moroseness), recast when my own
--- cast of it runs out
-function FIGHT.combatBuffs()
+-- in a fight, after the burns: my combat buffs (not under a better one the game said blocks it: Twincast under Improved
+-- Twincast). Ahead of the burns the Twincast spell went first and Improved Twincast waited for it to fade (28s and 23s
+-- on two named pulls)
+function FIGHT.selfCombatBuffs()
     for _, b in ipairs(list(S.combatBuffs)) do
         if spellReady(b) and not mq.TLO.Me.Buff(b)() and not mq.TLO.Me.Song(b)() and buffStacks(b, false)
             and castOn(b, myId(), 'combat buff') then return true end
     end
+    return false
+end
+
+-- in a fight: tank buffs on the group main tank (a mage's Igneous Veil and Boiling Skin, a shaman's Moroseness), recast
+-- when my own cast of it runs out
+function FIGHT.tankBuffs()
     local mt = mq.TLO.Group.MainTank
     local id = S.tankBuffs ~= '' and mt() and mt.Type() ~= 'Corpse' and mt.ID() or 0
     if id == 0 then return false end
@@ -1647,8 +1678,7 @@ local function doDefense()
 end
 
 -- my pet's abilities (role Pet), in a fight: a heal under 30% pet HP (Mend Companion), a guard not on it yet once a mob
--- wears it under 80% (Companion's Aegis, Host in the Shell, Companion's Fortification). MQ2Mage and MQ2Bst use them while
--- a mob is on the pet; they sat Off
+-- wears it under 80% (Companion's Aegis, Host in the Shell, Companion's Fortification); they used to sit Off
 function FIGHT.petGuard()
     local pet = mq.TLO.Me.Pet
     if (pet.ID() or 0) == 0 or #hostiles() == 0 then return false end
@@ -1733,7 +1763,7 @@ local function needy(what, below, range, notMe)
     return id, name, pct
 end
 
--- a Mana ability for others goes where it's needed (MQ2Bst, MQ2Bard): a single-target one (Focused Paragon of Spirits) on
+-- a Mana ability for others goes where it's needed: a single-target one (Focused Paragon of Spirits) on
 -- the group member lowest in mana under 80% (60% when its reuse is over 2 minutes), a group one (Paragon of Spirit) when
 -- anyone is under 60%, one used on the mob in a fight when a caster is under 30% (a bard's Reflexive Rebuttal: its
 -- recourse is the group's mana) or I am under the mana-tools % (Thought Leech). They went on me only: Nhambuko gave
@@ -1807,7 +1837,7 @@ local function doMana()
     return false
 end
 
--- out of combat: Endurance abilities (MQ2Bard). One for a single target (a bard's Rallying Call) goes to another
+-- out of combat: Endurance abilities. One for a single target (a bard's Rallying Call) goes to another
 -- groupmate under 30% mana, else to whoever else is lowest in endurance under the endurance %; my own is the self one,
 -- which is free (Rallying Call costs 25000 mana and endurance, Rallying Solo nothing). A self one goes under the
 -- endurance %, or under 30% mana when it gives mana (Rallying Solo)
@@ -1882,10 +1912,22 @@ end
 
 -- a proc window first: under Gift of Mana (the next spell costs no mana) the most expensive ready DoT
 -- or nuke, at any mana; under a twincast (Twincast, Improved Twincast, Bifold Focus) the most expensive one above its
--- mana %. The list order spent the free or doubled spell on whatever came first
+-- mana %. The list order spent the free or doubled spell on whatever came first.
+-- With a twincast order set (Twincast nukes; Improved Twincast nukes while that one is on) the first ready one of it
+-- instead, and no other nuke until the twincast ends (returns false, true): a bolt would spend the doubled cast. Zenban
+-- cast Spear under a twincast 211 times of 389 and Bolt 22
 function FIGHT.procSpell(t)
     local gift = FIGHT.buffOn('Gift of Mana, Gift of Radiant Mana, Gift of Exquisite Radiant Mana')
     if not gift and not FIGHT.buffOn('Twincast, Improved Twincast, Bifold Focus') then return false end
+    if not gift and S.nuke then
+        local order = FIGHT.buffOn('Improved Twincast') and S.itNukes ~= '' and S.itNukes or S.twincastNukes
+        if order ~= '' then
+            for _, n in ipairs(list(order)) do
+                if (mana() >= S.nukeManaMin or FIGHT.tap(n)) and castOn(n, t.ID(), 'nuke, twincast') then return true end
+            end
+            return false, true
+        end
+    end
     local best, cost, dot = nil, -1, false
     local function consider(name, isDot, floor)
         if not gift and mana() < floor and not FIGHT.tap(name) then return end
@@ -1903,10 +1945,11 @@ end
 local function doDps(t)
     -- both roles use DPS abilities + nukes; Tank-only abilities/stuns are handled in doTank
     if not alive(t) then return false end
-    if FIGHT.procSpell(t) then return true end
+    local proc, hold = FIGHT.procSpell(t)
+    if proc then return true end
     -- spells first when one is ready (DoTs once per mob, then nukes); the instant abilities fill the gaps between
     -- casts. Abilities first starved the spells: one with no reuse timer is ready again every few seconds.
-    -- A beastlord's abilities go first, as in MQ2Bst (Wallop, Bestial Fierceness, Chameleon Strike, then the spells; its
+    -- A beastlord's abilities go first (Wallop, Bestial Fierceness, Chameleon Strike, then the spells; its
     -- Eagle Strike and Round Kick mostly go off by the game's auto-skill, so they read not ready in a fight)
     local first = mq.TLO.Me.Class.ShortName() == 'BST'
     if first then
@@ -1918,7 +1961,7 @@ local function doDps(t)
     if S.dot and (t.PctHPs() or 0) > (t.Named() and 5 or 40) then
         for _, d in ipairs(list(S.dots)) do if (dotOk or FIGHT.tap(d)) and not onMob(t, d) and castOnMob(d, t, 'dot') then return true end end
     end
-    if S.nuke then
+    if S.nuke and not hold then
         for _, n in ipairs(list(S.nukes)) do if (nukeOk or FIGHT.tap(n)) and castOn(n, t.ID(), 'nuke') then return true end end
     end
     if not first then
@@ -2150,7 +2193,7 @@ end
 -- true when it did something; the same buff on the same target is retried after a minute at most
 local function tryBuff(b, id, why)
     local key = id .. '|' .. b
-    if blocked(b) or mq.gettime() - (R.buffTry[key] or 0) < 60000 then return false end
+    if blocked(b) or mq.gettime() - (R.buffTry[key] or 0) < 60000 or FIGHT.noReagent(mq.TLO.Spell(b)) then return false end
     if spellReady(b) then
         R.buffTry[key] = mq.gettime()
         local tt = mq.TLO.Spell(b).TargetType() or ''
@@ -2224,6 +2267,17 @@ do   -- its tables stay out of the main chunk (LuaJIT allows it 200 locals)
 local PETORDER = { MAG = { 'Sum: Water', 'Sum: Earth', 'Sum: Fire', 'Sum: Air' } }
 local NOTPET = { ['Sum: Swarm'] = true, ['Sum: Familiar'] = true, ['Sum: Bodyguard'] = true }
 local PETBUFF = { ['Pet Haste'] = true, ['Pet Misc Buffs'] = true, Block = true }
+-- shrinks my pet: a pet-target pet shrink (SPA 298, Diminutive Companion) or a single-target shrink (SPA 89 under 100%,
+-- Shrink); no duration, so never an illusion
+local function shrinks(sp)
+    local tt = sp.TargetType() or ''
+    if (tt ~= 'Pet' and tt ~= 'Single') or (sp.Duration.TotalSeconds() or 0) > 0 or not (sp.SpellType() or ''):find('^Beneficial') then return false end
+    if sp.HasSPA(298)() then return true end
+    for i = 1, (sp.NumEffects() or 0) do
+        if sp.Attrib(i)() == 89 then return (sp.Base(i)() or 100) < 100 end
+    end
+    return false
+end
 function petBook()
     local lvl = mq.TLO.Me.Level() or 0
     if R.petBook and R.petBook.lvl == lvl then return R.petBook end
@@ -2233,6 +2287,8 @@ function petBook()
         if b() and (b.Level() or 0) <= lvl and b.Category() == 'Create Item' and b.Subcategory() == 'Summon Weapon'
             and (b.Name() or ''):find('^Grant') and b.TargetType() == 'Single' then
             if not pb.weapon or (b.Level() or 0) > pb.weaponLvl then pb.weapon, pb.weaponLvl = b.Name(), b.Level() or 0 end
+        elseif b() and (b.Level() or 0) <= lvl and (b.HasSPA(298)() or b.HasSPA(89)()) and shrinks(b) then
+            if not pb.shrink or (b.Level() or 0) > pb.shrinkLvl then pb.shrink, pb.shrinkLvl = b.Name(), b.Level() or 0 end
         elseif b() and (b.Level() or 0) <= lvl and b.Category() == 'Pet' then
             local sub, tt, l = b.Subcategory() or '', b.TargetType() or '', b.Level() or 0
             if sub:find('^Sum:') and not NOTPET[sub] and tt == 'Self' then
@@ -2256,6 +2312,37 @@ function petBook()
     return pb
 end
 
+-- shrink my pet, again while each one makes it smaller (down to the smallest the game allows), once per pet: a new pet,
+-- or the same one after zoning, has a new spawn id. An ability first (Diminutive Companion, a shaman's or beastlord's
+-- Shrink; one switched OFF in the Abilities tab isn't used), else the book's spell (Shrink)
+local function shrinkPet(pet)
+    local sh = R.petShrink
+    if not sh or sh.id ~= pet.ID() then sh = { id = pet.ID(), n = 0, at = 0 }; R.petShrink = sh end
+    if sh.done or casting() or mq.gettime() < sh.at or (pet.Distance3D() or 999) > 100 then return false end
+    local h = pet.Height() or 0
+    if sh.h and (h > sh.h - 0.05 or sh.n >= 8) then
+        sh.done = true
+        if sh.n > 1 then log('pet shrunk to %.2f', h) end
+        return false
+    end
+    local why = string.format('shrink pet, height %.2f', h)
+    local function used(wait) sh.h, sh.n, sh.at = h, sh.n + 1, mq.gettime() + wait; return true end
+    local have = false
+    for _, a in ipairs(S.abilities) do
+        local sp = a.kind == 'aa' and a.enabled ~= false and abilitySpell(a)
+        if sp and sp() and shrinks(sp) then
+            have = true
+            if useAbility(a, sp.TargetType() == 'Single' and pet.ID() or nil, why) then return used(2000) end
+        end
+    end
+    local b = not have and petBook().shrink
+    if not b then return false end
+    if spellReady(b) then
+        return castOn(b, pet.ID(), why) and used(2000 + (mq.TLO.Spell(b).MyCastTime() or 0))
+    end
+    return tryBuff(b, pet.ID(), why)   -- memorizes it
+end
+
 function doPetCare()
     if not S.usePet or FIGHT.keepInvis() then return false end
     local pb = petBook()
@@ -2268,7 +2355,7 @@ function doPetCare()
     for _, b in ipairs(pb.buffs) do
         if not blocked(b) and not mq.TLO.Pet.Buff(b)() and mq.TLO.Spell(b).StacksPet() and tryBuff(b, pet.ID(), 'pet buff') then return true end
     end
-    return false
+    return S.shrinkPet and shrinkPet(pet) or false
 end
 end
 
@@ -2474,13 +2561,28 @@ local function canRez()
     return rezSpell() ~= ''
 end
 
+-- in a fight someone who died stays dead for 10s while the heals go to the living, and is rezzed only while the main
+-- tank and main assist still stand (a rez in a wipe only gives the mobs another target; out of combat is unchanged)
+function FIGHT.rezNow(name)
+    if mq.gettime() - (R.diedAt[name] or mq.gettime()) < 10000 then return false end
+    for _, m in ipairs({ mq.TLO.Group.MainTank, mq.TLO.Group.MainAssist }) do
+        if m.Name() and (not m.Present() or m.Type() == 'Corpse') then return false end
+    end
+    return true
+end
+
 function doRez()
     if not S.rez or FIGHT.keepInvis() then return false end
     local fight = #hostiles() > 0
     local who = {}
     for i = 1, (mq.TLO.Group.Members() or 0) do
         local m = mq.TLO.Group.Member(i)
-        if m.Name() then table.insert(who, { name = m.Name(), dead = m.Type() == 'Corpse' }) end
+        local n = m.Name()
+        if n then
+            local dead = m.Type() == 'Corpse'
+            if dead then R.diedAt[n] = R.diedAt[n] or mq.gettime() else R.diedAt[n] = nil end
+            table.insert(who, { name = n, dead = dead })
+        end
     end
     -- my own corpse too, out of combat: resurrecting it wins the experience back
     if not fight then table.insert(who, { name = ME, me = true }) end
@@ -2504,7 +2606,7 @@ function doRez()
                 return true
             end
         end
-        if near and not rezzedBefore(c) and (not fight or w.dead) then
+        if near and not rezzedBefore(c) and (not fight or (w.dead and FIGHT.rezNow(w.name))) then
             local key = c.ID() .. '|rez'
             for _, n in ipairs(fight and COMBATREZ or REZAA) do
                 if mq.TLO.Me.AltAbilityReady(n)() and mq.gettime() - (R.buffTry[key] or 0) > (fight and 10000 or 60000) and targetId(c.ID()) then
@@ -2922,7 +3024,7 @@ local function fightTick()
     if doRez() then return end
     if (mq.TLO.Target.ID() or 0) ~= R.targetId or not R.attacking then restoreFight() end
     if hp() < 12 and S.mode == 'Hunter' and (mq.TLO.Group.Members() or 0) == 0 then stopAll('HP critical'); return end
-    if FIGHT.combatBuffs() then return end
+    if FIGHT.tankBuffs() then return end
     if not ranged() and mq.gettime() < R.holdUntil then
         if reachable(t, 35) then
             R.holdUntil = 0; mq.cmd('/attack on'); stick()
@@ -2965,9 +3067,10 @@ local function fightTick()
     if FIGHT.petGuard() then return end
     if doDuties(t) then return end
     if doBurn(t) then return end
+    if FIGHT.selfCombatBuffs() then return end
     if doEndurance() then return end   -- in a fight only its mana part acts (shard, Mana abilities)
     if doDps(t) then return end
-    -- a bard's songs after its abilities (MQ2Bard: Fierce Eye, Kick, the burns, Bellow, then the songs): a song every
+    -- a bard's songs after its abilities (Fierce Eye, Kick, the burns, Bellow, then the songs): a song every
     -- tick left the abilities only the moments when every song in the list was up
     if doSongs() then return end
     if inState() > 300000 then log('fight timeout'); attackOff(); R.pickId = 0; setState('FIND') end
@@ -3852,11 +3955,17 @@ function draw()
                 ImGui.SameLine(); ImGui.TextDisabled(ranged() and '(ranged)' or '(melee)')
                 if ranged() then S.castRange = ImGui.SliderInt('Cast range', S.castRange, 30, 200) end
                 listInput('Nukes (DPS)', 'nukes')
+                listInput('Twincast nukes, in order', 'twincastNukes')
+                tip('Under a twincast buff: the first ready one of these, and no other nuke until it ends. Empty: the most expensive ready nuke.')
+                listInput('Improved Twincast nukes, in order', 'itNukes')
+                tip('Under Improved Twincast (a burn): these instead of the Twincast list.')
                 listInput('DoTs (DPS, once per target)', 'dots')
                 listInput('Debuffs: slow, malo, cripple (once per target)', 'debuffs')
                 listInput('Mez (CC adds)', 'mez')
                 S.petSpell = ImGui.InputText('Pet summon', S.petSpell)
                 S.usePet = ImGui.Checkbox('Use pet', S.usePet)
+                ImGui.SameLine(); S.shrinkPet = ImGui.Checkbox('Shrink pet', S.shrinkPet)
+                tip('Shrink each new pet (Diminutive Companion, Shrink) down to the smallest it goes, out of fights.')
                 S.nukeManaMin = ImGui.SliderInt('Nuke above mana %', S.nukeManaMin, 0, 100)
                 tip('Under it only lifetaps are cast (they heal). Under Gift of Mana (the next spell is free) any mana will do.')
                 S.dotManaMin = ImGui.SliderInt('DoTs above mana %', S.dotManaMin, 0, 100)

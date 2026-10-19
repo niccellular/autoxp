@@ -71,15 +71,18 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Fights:** burns on any named on the extended target list, or on 5+ mobs there (Burn on mobs); a discipline that
   lasts waits for the running one. Under Gift of Mana (the next spell is free) the most expensive ready DoT or nuke goes
   first, at any mana; under a twincast (Twincast, Improved Twincast, Bifold Focus) the most expensive one above its
-  mana %. DoTs wait under "DoTs above mana %" (40), nukes under "Nuke above mana %". A beastlord's abilities go before
-  its spells (MQ2Bst's order).
+  mana %, or with a twincast order set ("Twincast nukes", "Improved Twincast nukes") the first ready one of it and no
+  other nuke until the twincast ends. Your combat buffs go after the burns (the Twincast spell no longer holds up
+  Improved Twincast). Swarm pets are sent in with the pet (/pet swarm). A spell is skipped while an item it needs
+  (used up or not) isn't in the bags. DoTs wait under "DoTs above mana %" (40), nukes under "Nuke above mana %". A beastlord's abilities go before
+  its spells.
   A detrimental AE (PB, targeted, directional) only goes off with 2+ mobs on XTarget, no mezzed one in its reach and
   no idle NPC there. Named mobs are never mezzed, and keep their DoTs and debuffs down to 5%. The tank casts its hate
   spells when its aggro slips. Tank buffs (a list) are kept on the group main tank in fights (a mage's short damage
   shields), recast when your cast of it runs out.
 - **Invisibility:** while invisible and not in a fight (nothing on the extended target list, not pulling or
   engaging), no casts, abilities, songs, item clicks, buffs or rezzes: a bard's group invis lasts the trip.
-- **Bards:** in a fight the abilities go first (MQ2Bard's order: Fierce Eye, Kick, the burns, Bellow), then the next
+- **Bards:** in a fight the abilities go first (Fierce Eye, Kick, the burns, Bellow), then the next
   song in the Songs list. Songs are sung on the move: following, closing in and melee carry on during a song, and a
   group or self song keeps the fight target.
 - **Buff duty:** self, group and pet buffs; each group member in range is checked every 30s, and a group version
@@ -95,14 +98,16 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   bard's Rallying Call goes to a caster under 30% mana.
 - **Cursor:** a summoned item left on the cursor (Modulation Shard, mod rod, pet weapon) goes into the bags after 2s
   (with a full hand nothing can be memorized); never while a trade, give, merchant or bank window is open.
-- **Rez duty:** in a fight only Call of the Wild (no exp, on someone still dead); out of combat an exp rez AA or
+- **Rez duty:** in a fight only Call of the Wild (no exp, on someone still dead), 10s after they died and only while
+  the main tank and main assist are alive (heals come first); out of combat an exp rez AA or
   the best rez spell, once per corpse (remembered for 3 hours across reloads). Out of combat it walks on the mesh to
   any group member's corpse in the zone (and its own), giving up on one after 90s; the Hunter tank holds its pulls
   meanwhile.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under
-  30% its heal (Mend Companion).
+  30% its heal (Mend Companion). Out of fights each new pet is shrunk (Diminutive Companion, Shrink AA, else a Shrink
+  spell from the book) down to the smallest it goes ("Shrink pet", on by default).
 - **Group window:** one row per DanNet peer running AutoXP — HP / mana / endurance, AutoXP state, target, status
   icons (dead, rez sickness, invis, invis vs undead, aggro, casting, sitting, stunned, pet, cure needed, other zone)
   and its latest log line; hover a name for details (duties, kills, XP and AA per hour), click it to target.
