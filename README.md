@@ -42,7 +42,7 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
   walking distance, and holds pulls while anyone is under "Rest below %" HP, a healer, CC or nuker (CLR, DRU, SHM,
-  ENC, BRD, MAG, WIZ, NEC) is under it in mana, a groupmate is casting its buffs (up to 60s each; a bard's songs
+  ENC, BRD, MAG, WIZ, NEC) is under it in mana (a bard: under 20%), a groupmate is casting its buffs (up to 60s each; a bard's songs
   don't count) or a groupmate is walking to or resurrecting a corpse (up to 3 minutes each).
   NPCs listed in the zone's Find Window (quest givers, merchants, bankers) are never hunted.
 - **Movement:** 3D distance and line of sight; navigates on the mesh instead of sticking through walls or floors.
@@ -62,11 +62,17 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   Debuff abilities (role Debuff: Malaise, Wind of Malaise, Sha's Reprisal...) go before the Debuffs list, and a mob
   gets one of each kind (malo, slow, cripple). Who debuffs is per character: turn Debuff off on a healer to keep it
   healing (e.g. the mage malos, the beastlord slows, the shaman heals).
-- **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically; passive AAs and
-  run-speed ones are Off; an AA that can't be kept up is a burn, not a buff). Per ability in the settings file:
+- **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically; passive AAs,
+  run-speed ones, memory blurs and knockbacks with no real damage (Silent / Sonic Displacement) are Off; an AA that
+  can't be kept up is a burn, not a buff; a pet AA is a burn when it makes the pet hit harder, else role Pet).
+  Per ability in the settings file:
   `excl = '<tag>'` makes abilities with that tag take turns (the next only once the earlier ones are used and faded),
   `notWith = 'A, B'` skips it while a buff starting with A or B is on you.
-- **Fights:** burns on any named on the extended target list; a discipline that lasts waits for the running one.
+- **Fights:** burns on any named on the extended target list, or on 5+ mobs there (Burn on mobs); a discipline that
+  lasts waits for the running one. Under Gift of Mana (the next spell is free) the most expensive ready DoT or nuke goes
+  first, at any mana; under a twincast (Twincast, Improved Twincast, Bifold Focus) the most expensive one above its
+  mana %. DoTs wait under "DoTs above mana %" (40), nukes under "Nuke above mana %". A beastlord's abilities go before
+  its spells (MQ2Bst's order).
   A detrimental AE (PB, targeted, directional) only goes off with 2+ mobs on XTarget, no mezzed one in its reach and
   no idle NPC there. Named mobs are never mezzed, and keep their DoTs and debuffs down to 5%. The tank casts its hate
   spells when its aggro slips. Tank buffs (a list) are kept on the group main tank in fights (a mage's short damage
@@ -83,7 +89,10 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Mana:** under the mana-tools % (default 50), in or out of combat, clicks a Modulation Shard from the bags (above
   70% HP), else uses a Mana ability (role Mana: Elemental Conversion, Cannibalization; Summon Modulation Shard only
   when none is in the bags), else a Mana spell (Gather Zeal, Traumatic Exchange). One that costs health keeps 20% HP
-  back (30% in a fight).
+  back (30% in a fight). A Mana ability for others goes to the group: a single-target one (Focused Paragon of Spirits)
+  on whoever is lowest under 80% mana, a group one (Paragon of Spirit) when anyone is under 60%, one used on the mob
+  when a caster is under 30% (a bard's Reflexive Rebuttal) or its own mana is low (Thought Leech). Out of combat a
+  bard's Rallying Call goes to a caster under 30% mana.
 - **Cursor:** a summoned item left on the cursor (Modulation Shard, mod rod, pet weapon) goes into the bags after 2s
   (with a full hand nothing can be memorized); never while a trade, give, merchant or bank window is open.
 - **Rez duty:** in a fight only Call of the Wild (no exp, on someone still dead); out of combat an exp rez AA or
@@ -91,7 +100,9 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   any group member's corpse in the zone (and its own), giving up on one after 90s; the Hunter tank holds its pulls
   meanwhile.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
-  folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty.
+  folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
+  under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under
+  30% its heal (Mend Companion).
 - **Group window:** one row per DanNet peer running AutoXP — HP / mana / endurance, AutoXP state, target, status
   icons (dead, rez sickness, invis, invis vs undead, aggro, casting, sitting, stunned, pet, cure needed, other zone)
   and its latest log line; hover a name for details (duties, kills, XP and AA per hour), click it to target.

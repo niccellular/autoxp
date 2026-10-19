@@ -1,4 +1,4 @@
--- autoxp: CWTN-style automation with ImGui front end.
+-- autoxp: group automation with ImGui front end.
 -- Modes: Hunter (find+pull), Assist (MA's target), Chase (follow a toon), Manual (act on own target).
 -- Role: Tank or DPS; duties: Heal, CC. Abilities, spell lists and melee/ranged style follow the character's class.
 -- /lua run autoxp [zone]   then /autoxp start|stop|pause|resume|show|scan|spells|mode <m>|role <tank|dps>|heal|cc [on|off]
@@ -19,8 +19,8 @@ end
 local ME = ((mq.TLO.Me.CleanName() or 'default'):gsub("'s corpse%d*$", ''))
 local CONFIG = string.format('%s/autoxp_%s.lua', mq.configDir, ME)
 local MODES = { 'Manual', 'Hunter', 'Assist', 'Chase' }
-local ROLES = { 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pull' }
-local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pull' }
+local ROLES = { 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pet', 'Pull' }
+local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pet', 'Pull' }
 
 -- settings (persisted) -------------------------------------------------------------------
 local S = {
@@ -30,13 +30,13 @@ local S = {
     assistName = '', assistAt = 95, chaseName = '', chaseDist = 30,
     restPct = 50, restTo = 90,
     selfHealPct = 50, groupHealPct = 40, tankHealPct = 75, emergencyPct = 20, healSpells = '',
-    nukes = '', nukeManaMin = 30, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
+    nukes = '', nukeManaMin = 30, dotManaMin = 40, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
     combatBuffs = 'Yaulp', stunCooldown = true, keepInFront = true,
     avoidMobs = true, avoidRadius = 100, pullVer = 0, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
     style = 'Auto', castRange = 100, mez = '', dots = '', debuffs = '', petSpell = '', usePet = true, class = '',
     songs = '', restSongs = '', songManaMin = 10, fillVer = 0, swapGem = false,
     tankBuffs = '', manaSpells = '', manaPct = 50, userLists = {}, rezDone = {},
-    defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true,
+    defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true, burnCount = 5,
     abilVer = 0, abilOrdered = false, abilFilter = 'All', pouchNames = 'Pouch of Quellious, Phantom Weapon Pack', showPeers = true, showHud = true, backupTank = false,
     abilities = {},   -- { {name=, kind='skill'|'aa'|'disc', role=} }
 }
@@ -68,7 +68,7 @@ local R = {
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
     ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0, nukeLevel = 0, nukeDebuff = nil,
-    mobCast = {}, buffTry = {}, buffChecked = {}, songNext = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {}, tankBuffUntil = {}, reagentNote = {},
+    mobCast = {}, buffTry = {}, buffChecked = {}, songNext = {}, abilUsed = {}, lastRoles = 0, rolesWarned = false, rezLevel = -1, rezName = '', restSongLevel = -1, feignAt = 0, cast = nil, petTry = 0, duckAt = 0, burnUntil = 0, lastHunt = 0, holdWhy = nil, tooCloseAt = 0, noRouteAt = 0, armFail = {}, armCheck = 0, rezzed = {}, abilNext = {}, mezResist = {}, noMez = {}, lastMez = nil, healMemLevel = -1, hotUntil = {}, findZone = '', findNames = {}, tankBuffUntil = {}, reagentNote = {},
 }
 -- one log per character: several clients run AutoXP at once
 local logf = io.open(mq.luaDir .. '/autoxp_log_' .. ME .. '.txt', 'a')
@@ -284,10 +284,14 @@ local function wrongBody(sp, s)
     return false
 end
 
+-- dead mid-tick: nothing is tried. Each try waited a second to see it fail - Pindaini died at 13:36:52 and went
+-- through 15 burns and songs, each "failed" and backed off, before step() saw she was dead (13:37:10)
+function FIGHT.dead() return mq.TLO.Me.State() == 'HOVER' or mq.TLO.Me.Dead() == true end
+
 -- start casting a gem spell on spawn id (self id for self/beneficial) and return; step() waits for it.
 -- kind 'heal' / 'cc' marks casts that are never ducked for a heal / a mez
 local function castOn(name, id, why, kind)
-    if not spellReady(name) or casting() or mq.TLO.Me.SpellInCooldown() or mq.TLO.Me.Stunned() then return false end
+    if FIGHT.dead() or not spellReady(name) or casting() or mq.TLO.Me.SpellInCooldown() or mq.TLO.Me.Stunned() then return false end
     if FIGHT.keepInvis() then return false end
     local sp = mq.TLO.Spell(name)
     -- not enough mana: every heal failed one after another (a shaman at 0% mana, 2026-10-17 14:16)
@@ -332,11 +336,18 @@ local function abilityReady(a)
     if blocked(a.name) or not readyNow(a) or (R.abilNext[a.name] or 0) > mq.gettime() then return false end
     if a.kind == 'skill' then return true end
     local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
-    return not sp() or (sp.EnduranceCost() or 0) <= (mq.TLO.Me.CurrentEndurance() or 0)
+    -- its endurance and its mana (Rallying Call costs 25000 of each: at 16% mana it "did not fire" every 20s)
+    return not sp() or ((sp.EnduranceCost() or 0) <= (mq.TLO.Me.CurrentEndurance() or 0)
+        and (sp.Mana() or 0) <= (mq.TLO.Me.CurrentMana() or 0))
 end
 
 local function useAbility(a, id, why)
-    if not abilityReady(a) or casting() or FIGHT.keepInvis() then return false end
+    if FIGHT.dead() or not abilityReady(a) or casting() or FIGHT.keepInvis() then return false end
+    -- an AA with a reuse timer that reads ready again just after it went off didn't take: the game refused it on landing
+    -- (Focused Paragon of Spirits on a groupmate under Paragon of Spirit, "used" 12 times in 12s at 08:00:22)
+    if a.kind == 'aa' and mq.gettime() - (R.abilUsed[a.name] or 0) < 5000 and (mq.TLO.Me.AltAbility(a.name).ReuseTime() or 0) >= 10 then
+        R.abilUsed[a.name] = nil; backoff(a.name, 'did not take', 30000); return false
+    end
     -- a beneficial single-target one used with no target goes on me (Voice of Thule: "You must first select a target")
     if not id and a.kind ~= 'skill' then
         local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
@@ -385,6 +396,7 @@ local function useAbility(a, id, why)
     if id ~= R.targetId then restoreFight() end
     if readyNow(a) then backoff(a.name, 'did not fire', 20000); return false end
     log('use %s %s (%s)', a.kind, a.name, why)
+    R.abilUsed[a.name] = mq.gettime()
     R.myBuffsAt = 0
     return true
 end
@@ -496,15 +508,25 @@ local function classify(name, kind)
     local reuse = kind == 'aa' and (mq.TLO.Me.AltAbility(name).ReuseTime() or 0) or 0
 
     if fx[74] then return 'Off' end                                   -- feign death: only to shed aggro (doShed)
+    if fx[63] then return 'Off' end                                   -- memory blur (Silent Displacement): the tank's hate goes too
     if fx[26] or fx[83] or fx[88] or fx[104] or fx[145] then return 'Off' end   -- gate / teleport / evac: never automatic
     do   -- gives mana (Elemental Conversion, Cannibalization): used when mana runs low, keeping HP back for one that costs it
         local d = (sp.Description() or ''):lower()
         if kind ~= 'disc' and not off and d:find('mana') and (d:find('restore') or d:find('return')) then return 'Mana' end
     end
-    if tt:find('^Pet') then return 'Off' end                          -- pet abilities aren't handled
+    -- my pet's (Pet / Pet2 target): one that makes it hit harder is a burn (Companion's Fury), a heal is for when it's low
+    -- (Mend Companion), the rest guard it while a mob wears it down (Companion's Aegis, Host in the Shell, Fortification,
+    -- Second Wind Ward); moving, shrinking or making the mobs forget it is never automatic
+    if tt:find('^Pet') then
+        if off then return 'Burn' end
+        if fx[194] or fx[298] or next(fx) == nil then return 'Off' end
+        return 'Pet', (pos(0) and dur == 0) and 'heal' or 'guard'
+    end
     -- run speed (Lupine Spirit fired 744 times as DPS): the bard's Selo's covers it
     if (sp.SpellType() or ''):find('^Beneficial') and pos(3) then return 'Off' end
     if pos(92) or pos(192) or pos(114) or fx[444] or is('Hatred') then return 'Tank' end
+    -- a knockback with no real damage (Sonic Displacement: 1 point) only pushes the mob off the tank
+    if not off and (sp.PushBack() or 0) > 0 and (fx[0] or 0) > -100 then return 'Off' end
     if self and (fx[0] or 0) < 0 then return 'Off' end               -- costs your own health (HP -> mana)
     -- real defense: a sizeable absorb, less damage taken, avoidance or block (a 5% rune riding on a burn isn't)
     if (self or group) and ((fx[161] or 0) >= 20 or (fx[162] or 0) >= 20 or pos(55) or (fx[168] or 0) < 0 or (fx[172] or 0) >= 20
@@ -569,16 +591,18 @@ end
 -- when each role fires (Abilities tab tooltip)
 local ABILUSE = {
     Off = 'Never used.', Tank = 'Tank role only: on cooldown in fights (Taunt when your aggro slips).',
-    DPS = 'On cooldown in fights.', Burn = 'On burns: a named mob on XTarget, a target at/above your level, 3+ mobs, or /autoxp burn.',
+    DPS = 'On cooldown in fights.', Burn = 'On burns: a named mob on XTarget, a target at/above your level, the burn mob count, or /autoxp burn.',
     Defense = 'panic: below Panic HP %.  mitigate: below Defense HP %.\nsustain: below Defense HP %, or (Tank role) on a named or 2+ mobs.',
     Heal = 'When you or a group member are under the heal thresholds.', Emergency = 'When your HP is under the emergency %.',
     CC = 'Interrupting a casting mob and stunning adds.', Buff = 'Kept up out of combat.',
     Debuff = 'Debuff duty: once per mob, before the Debuffs list (malo on adds waiting for a mez first).',
-    Endurance = 'Out of combat when endurance is under the endurance %.', Pull = 'As the pull method.',
-    Mana = 'When your mana is under the mana-tools %, in or out of combat; one that costs health keeps 20% HP back\n(30% in a fight). Summon Modulation Shard only when none is in the bags.',
+    Endurance = 'Out of combat when endurance is under the endurance %.\nOne for a single target (Rallying Call): a groupmate under 30% mana, else the lowest under the endurance %.',
+    Pull = 'As the pull method.',
+    Mana = 'When your mana is under the mana-tools %, in or out of combat; one that costs health keeps 20% HP back\n(30% in a fight). Summon Modulation Shard only when none is in the bags.\nOne for others goes to the group: single target (Focused Paragon) on the lowest under 80% mana (60% if its\nreuse is over 2 min), a group one under 60%, one used on the mob when a caster is under 30%\n(Reflexive Rebuttal) or you are under the mana-tools % (Thought Leech).',
+    Pet = 'In fights: heal (Mend Companion) under 30% pet HP; guard (Companion\'s Aegis, Host in the Shell) once the pet\nis under 80% HP and the guard isn\'t on it.',
 }
 
-local ABILVER = 13   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
+local ABILVER = 14   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
 local function scanAbilities()
     local found, seen, oldPos = {}, {}, {}
     for i, old in ipairs(S.abilities) do oldPos[old.name] = i end
@@ -1622,8 +1646,26 @@ local function doDefense()
     return false
 end
 
--- Burn abilities, in list order: a named mob anywhere on XTarget, a target at/above my level, 3+ mobs, or /autoxp burn
--- (60s). Abilities with an excl tag take turns, and a discipline that lasts waits for the running one
+-- my pet's abilities (role Pet), in a fight: a heal under 30% pet HP (Mend Companion), a guard not on it yet once a mob
+-- wears it under 80% (Companion's Aegis, Host in the Shell, Companion's Fortification). MQ2Mage and MQ2Bst use them while
+-- a mob is on the pet; they sat Off
+function FIGHT.petGuard()
+    local pet = mq.TLO.Me.Pet
+    if (pet.ID() or 0) == 0 or #hostiles() == 0 then return false end
+    local php = pet.PctHPs() or 100
+    if php >= 80 then return false end
+    for _, a in ipairs(abilitiesFor('Pet')) do
+        local sp = abilitySpell(a)
+        local on = sp and sp() and (sp.Duration.TotalSeconds() or 0) > 0 and mq.TLO.Pet.Buff(sp.Name())() ~= nil
+        local want = (a.tier == 'heal' and php < 30) or (a.tier ~= 'heal' and not on)
+        if want and useAbility(a, nil, string.format('pet HP %d%%', php)) then return true end
+    end
+    return false
+end
+
+-- Burn abilities, in list order: a named mob anywhere on XTarget, a target at/above my level, the burn mob count (5: at
+-- 3 the long burns went on trash pulls), or /autoxp burn (60s). Abilities with an excl tag take
+-- turns, and a discipline that lasts waits for the running one
 local function burning(t)
     if mq.gettime() < R.burnUntil then return true end
     if S.burnNamed then
@@ -1631,7 +1673,7 @@ local function burning(t)
     end
     if not alive(t) then return false end
     return (S.burnNamed and t.Named()) or (S.burnLevel and (t.Level() or 0) >= (mq.TLO.Me.Level() or 0))
-        or (S.burnAdds and #hostiles() >= 3) or false
+        or (S.burnAdds and #hostiles() >= S.burnCount) or false
 end
 
 local function doBurn(t)
@@ -1671,11 +1713,82 @@ local function hpLeft(sp)
     return cost == 0 or (mq.TLO.Me.CurrentHPs() or 0) - cost > (mq.TLO.Me.MaxHPs() or 0) * (#hostiles() > 0 and 0.3 or 0.2)
 end
 
+-- the group member (me too) lowest in mana (those who use it) or endurance, under a % and in range: a gift goes to whoever
+-- needs it most. Its id, name and %
+local NOMANACLS = { WAR = true, MNK = true, ROG = true, BER = true }
+local function needy(what, below, range, notMe)
+    local id, name, pct
+    local function try(n, sid, p) if p < below and (not pct or p < pct) then id, name, pct = sid, n, p end end
+    local me = mq.TLO.Me
+    if not notMe and (what ~= 'mana' or (me.MaxMana() or 0) > 0) then
+        try(me.CleanName(), myId(), what == 'mana' and mana() or (me.PctEndurance() or 100))
+    end
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        if m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse' and (m.Spawn.ID() or 0) > 0 and (m.Spawn.Distance3D() or 999) <= range
+            and (what ~= 'mana' or not NOMANACLS[m.Class.ShortName() or '']) then
+            try(m.Name() or '?', m.Spawn.ID() or 0, what == 'mana' and (m.PctMana() or 100) or (m.PctEndurance() or 100))
+        end
+    end
+    return id, name, pct
+end
+
+-- a Mana ability for others goes where it's needed (MQ2Bst, MQ2Bard): a single-target one (Focused Paragon of Spirits) on
+-- the group member lowest in mana under 80% (60% when its reuse is over 2 minutes), a group one (Paragon of Spirit) when
+-- anyone is under 60%, one used on the mob in a fight when a caster is under 30% (a bard's Reflexive Rebuttal: its
+-- recourse is the group's mana) or I am under the mana-tools % (Thought Leech). They went on me only: Nhambuko gave
+-- herself 177 Focused Paragons while Pindaini sat at 52% mana holding the pulls, and Reflexive Rebuttal and Thought
+-- Leech, aimed at their own casters, "did not fire" 107 and 18 times
+-- a gift that costs my own mana only while I keep the mana-tools % after paying it: Rallying Call (25000 mana) on Seaeni
+-- took Pindaini from 29% to 13% and the Hunter waited on her (12:31, 12:43)
+local function canGive(sp)
+    local cost, max = sp.Mana() or 0, mq.TLO.Me.MaxMana() or 0
+    return cost == 0 or (max > 0 and ((mq.TLO.Me.CurrentMana() or 0) - cost) * 100 / max >= S.manaPct)
+end
+local function forOthers(sp)
+    if not sp or not sp() then return nil end
+    if sp.SpellType() == 'Detrimental' then return 'mob' end
+    local tt = sp.TargetType() or ''
+    return (tt == 'Single' and 'one') or (tt:find('^Group') and 'all') or nil
+end
+local function giveMana()
+    -- while my group one is up (Paragon of Spirit) the single-target one waits: "Focused Paragon of Spirit is blocked by
+    -- Paragon of Spirit" on Pindaini, 2026-10-18 07:50:29
+    local groupUp = false
+    for _, a in ipairs(abilitiesFor('Mana')) do
+        local sp = abilitySpell(a)
+        if forOthers(sp) == 'all' and FIGHT.buffOn(sp.Name()) then groupUp = true end
+    end
+    for _, a in ipairs(abilitiesFor('Mana')) do
+        local sp = abilitySpell(a)
+        local how = abilityReady(a) and forOthers(sp)
+        if how == 'one' and groupUp then how = nil end
+        if how == 'mob' then
+            -- a caster under 30% only for one whose mana goes to the group ("restores mana to your group"): Thought Leech
+            -- fills only me and went at 07:54:45 for Seaeni at 28%
+            local t = spawn(R.targetId)
+            local who, name, p
+            if (sp.Description() or ''):lower():find('group') then who, name, p = needy('mana', 30, 500) end
+            if not who and (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < S.manaPct then who, name, p = myId(), mq.TLO.Me.CleanName(), mana() end
+            if who and R.state == 'FIGHT' and alive(t) and useAbility(a, t.ID(), string.format('%s at %d%% mana', name, p)) then return true end
+        elseif how then
+            local reuse = a.kind == 'aa' and (mq.TLO.Me.AltAbility(a.name).ReuseTime() or 0) or 0
+            local who, name, p = needy('mana', (how == 'one' and reuse <= 120) and 80 or 60,
+                how == 'one' and (sp.Range() or 100) or math.max(50, sp.AERange() or 0))
+            if who and (who == myId() or canGive(sp)) and hpLeft(sp)
+                and useAbility(a, how == 'one' and who or nil, string.format('%s at %d%% mana', name, p)) then return true end
+        end
+    end
+    return false
+end
+
 -- mana under the mana-tools % (default 50): a Modulation Shard from the bags (it trades health for mana: above 70% HP),
--- else a Mana ability (Elemental Conversion, Cannibalization; Summon Modulation Shard only when no shard is in the bags),
--- else a Mana spell (Gather Zeal, Traumatic Exchange)
+-- else a Mana ability of my own (Elemental Conversion, Cannibalization; Summon Modulation Shard only when no shard is in
+-- the bags), else a Mana spell (Gather Zeal, Traumatic Exchange). The ones for others go first, wherever they're needed
 local function doMana()
-    if (mq.TLO.Me.MaxMana() or 0) == 0 or mana() >= S.manaPct or casting() or FIGHT.keepInvis() then return false end
+    if casting() or FIGHT.keepInvis() then return false end
+    if giveMana() then return true end
+    if (mq.TLO.Me.MaxMana() or 0) == 0 or mana() >= S.manaPct then return false end
     local shard = mq.TLO.FindItem('Modulation Shard')
     if shard() and hp() > 70 and (shard.TimerReady() or 0) == 0 and mq.gettime() - (R.shardAt or 0) > 3000 then
         R.shardAt = mq.gettime()
@@ -1686,9 +1799,7 @@ local function doMana()
     local why = string.format('mana %d%%', mana())
     for _, a in ipairs(abilitiesFor('Mana')) do
         local sp = abilitySpell(a)
-        -- one for a single target (Focused Paragon of Spirits) goes on me
-        local tid = sp and sp() and sp.TargetType() == 'Single' and myId() or nil
-        if not (a.name:find('Modulation Shard') and shard()) and hpLeft(sp) and useAbility(a, tid, why) then return true end
+        if not forOthers(sp) and not (a.name:find('Modulation Shard') and shard()) and hpLeft(sp) and useAbility(a, nil, why) then return true end
     end
     for _, s in ipairs(list(S.manaSpells)) do
         if hpLeft(mq.TLO.Spell(s)) and castOn(s, myId(), why) then return true end
@@ -1696,11 +1807,29 @@ local function doMana()
     return false
 end
 
+-- out of combat: Endurance abilities (MQ2Bard). One for a single target (a bard's Rallying Call) goes to another
+-- groupmate under 30% mana, else to whoever else is lowest in endurance under the endurance %; my own is the self one,
+-- which is free (Rallying Call costs 25000 mana and endurance, Rallying Solo nothing). A self one goes under the
+-- endurance %, or under 30% mana when it gives mana (Rallying Solo)
 function doEndurance()
     if doMana() then return true end
-    if #hostiles() > 0 or (mq.TLO.Me.PctEndurance() or 100) >= S.endPct then return false end
+    if #hostiles() > 0 then return false end
+    local low = (mq.TLO.Me.PctEndurance() or 100) < S.endPct
+    local lowMana = (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < 30
     for _, a in ipairs(abilitiesFor('Endurance')) do
-        if not abilityUp(a) and useAbility(a, nil, 'endurance') then return true end
+        local sp = abilitySpell(a)
+        if sp and sp() and sp.TargetType() == 'Single' then
+            if abilityReady(a) and canGive(sp) then
+                local r = sp.Range() or 100
+                local who, name, p = needy('mana', 30, r, true)
+                local what = 'mana'
+                if not who then who, name, p = needy('endurance', S.endPct, r, true); what = 'endurance' end
+                if who and useAbility(a, who, string.format('%s at %d%% %s', name, p, what)) then return true end
+            end
+        elseif (low or (lowMana and sp and sp() and (sp.Description() or ''):lower():find('mana')))
+            and not abilityUp(a) and useAbility(a, nil, low and 'endurance' or string.format('mana %d%%', mana())) then
+            return true
+        end
     end
     return false
 end
@@ -1751,20 +1880,50 @@ local function doDuties(t)
     return doCC(t) or doDebuff(t)
 end
 
+-- a proc window first: under Gift of Mana (the next spell costs no mana) the most expensive ready DoT
+-- or nuke, at any mana; under a twincast (Twincast, Improved Twincast, Bifold Focus) the most expensive one above its
+-- mana %. The list order spent the free or doubled spell on whatever came first
+function FIGHT.procSpell(t)
+    local gift = FIGHT.buffOn('Gift of Mana, Gift of Radiant Mana, Gift of Exquisite Radiant Mana')
+    if not gift and not FIGHT.buffOn('Twincast, Improved Twincast, Bifold Focus') then return false end
+    local best, cost, dot = nil, -1, false
+    local function consider(name, isDot, floor)
+        if not gift and mana() < floor and not FIGHT.tap(name) then return end
+        local m = mq.TLO.Spell(name).Mana() or 0
+        if m > cost and spellReady(name) and not (isDot and onMob(t, name)) then best, cost, dot = name, m, isDot end
+    end
+    if S.dot and (t.PctHPs() or 0) > (t.Named() and 5 or 40) then for _, d in ipairs(list(S.dots)) do consider(d, true, S.dotManaMin) end end
+    if S.nuke then for _, n in ipairs(list(S.nukes)) do consider(n, false, S.nukeManaMin) end end
+    if not best then return false end
+    local why = gift and 'gift of mana' or 'twincast'
+    if dot then return castOnMob(best, t, 'dot, ' .. why) end
+    return castOn(best, t.ID(), 'nuke, ' .. why)
+end
+
 local function doDps(t)
     -- both roles use DPS abilities + nukes; Tank-only abilities/stuns are handled in doTank
     if not alive(t) then return false end
+    if FIGHT.procSpell(t) then return true end
     -- spells first when one is ready (DoTs once per mob, then nukes); the instant abilities fill the gaps between
-    -- casts. Abilities first starved the spells: one with no reuse timer is ready again every few seconds
-    -- under Nuke above mana % only the lifetaps go on (they heal); a named gets its DoTs down to 5%
-    local manaOk = mana() >= S.nukeManaMin
+    -- casts. Abilities first starved the spells: one with no reuse timer is ready again every few seconds.
+    -- A beastlord's abilities go first, as in MQ2Bst (Wallop, Bestial Fierceness, Chameleon Strike, then the spells; its
+    -- Eagle Strike and Round Kick mostly go off by the game's auto-skill, so they read not ready in a fight)
+    local first = mq.TLO.Me.Class.ShortName() == 'BST'
+    if first then
+        for _, a in ipairs(abilitiesFor('DPS')) do if not FIGHT.discBusy(a) and useAbility(a, t.ID(), 'dps') then return true end end
+    end
+    -- under Nuke above mana % only the lifetaps go on (they heal), under DoTs above mana % only the lifetap DoTs; a named
+    -- gets its DoTs down to 5%
+    local nukeOk, dotOk = mana() >= S.nukeManaMin, mana() >= S.dotManaMin
     if S.dot and (t.PctHPs() or 0) > (t.Named() and 5 or 40) then
-        for _, d in ipairs(list(S.dots)) do if (manaOk or FIGHT.tap(d)) and not onMob(t, d) and castOnMob(d, t, 'dot') then return true end end
+        for _, d in ipairs(list(S.dots)) do if (dotOk or FIGHT.tap(d)) and not onMob(t, d) and castOnMob(d, t, 'dot') then return true end end
     end
     if S.nuke then
-        for _, n in ipairs(list(S.nukes)) do if (manaOk or FIGHT.tap(n)) and castOn(n, t.ID(), 'nuke') then return true end end
+        for _, n in ipairs(list(S.nukes)) do if (nukeOk or FIGHT.tap(n)) and castOn(n, t.ID(), 'nuke') then return true end end
     end
-    for _, a in ipairs(abilitiesFor('DPS')) do if not FIGHT.discBusy(a) and useAbility(a, t.ID(), 'dps') then return true end end
+    if not first then
+        for _, a in ipairs(abilitiesFor('DPS')) do if not FIGHT.discBusy(a) and useAbility(a, t.ID(), 'dps') then return true end end
+    end
     return false
 end
 
@@ -2440,7 +2599,10 @@ local function pullHold(travel)
         else
             local s = m.Spawn
             for _, b in ipairs(SICK) do if s() and s.CachedBuff(b)() then return name .. ' has ' .. b end end
-            if HEALCC[m.Class.ShortName() or ''] and (m.PctMana() or 100) < S.restPct then
+            -- a bard only under 20%: its songs and single mez cost nothing, and it settles near 52% (Pindaini held the
+            -- pulls 34% of the time at 51-54% under a 55% line, Focused Paragons or not, 2026-10-18)
+            local cls = m.Class.ShortName() or ''
+            if HEALCC[cls] and (m.PctMana() or 100) < (cls == 'BRD' and math.min(20, S.restPct) or S.restPct) then
                 return string.format('%s is at %d%% mana', name, m.PctMana() or 0)
             end
             if (m.PctHPs() or 100) < S.restPct then return string.format('%s is at %d%% HP', name, m.PctHPs() or 0) end
@@ -2631,6 +2793,22 @@ mq.event('axpCannotCast', 'You cannot cast #1# on #2#.', function(_, _, who)
         mq.cmd('/nav stop'); attackOff(); setState('FIND')
     end
 end)
+-- a mob in a safe area (a Coldain camp): it and every NPC within 200 of it are skipped for 10 minutes. The Hunter cast at
+-- a Coldain reclaimer for 5 minutes, until the fight timeout ("You cannot cast detrimental spells..." 444 times, 14:11)
+mq.event('axpSafeArea', 'You cannot cast detrimental spells because you are in a safe area.', function()
+    local t = spawn(R.targetId ~= 0 and R.targetId or R.pickId)
+    if not (alive(t) and t.Type() == 'NPC' and (R.state == 'APPROACH' or R.state == 'FIGHT')) then return end
+    local q, n = string.format('npc loc %.0f %.0f radius 200', t.X() or 0, t.Y() or 0), 0
+    for i = 1, 40 do
+        local s = mq.TLO.NearestSpawn(i, q)
+        if not s() then break end
+        R.skip[s.ID()] = mq.gettime() + 600000; n = n + 1
+    end
+    R.skip[t.ID()] = mq.gettime() + 600000
+    log('%s is in a safe area - skipping it and %d NPC(s) around it', t.CleanName(), n)
+    R.targetId, R.pickId = 0, 0
+    mq.cmd('/nav stop'); attackOff(); setState('FIND')
+end)
 
 local function healNeeded()
     if not S.heal then return false end
@@ -2699,13 +2877,23 @@ local function leadSpawn()
     return c and c() and c.Type() ~= 'Corpse' and c or nil
 end
 
--- Chase: walk to within half the chase distance of the leader once they're further than it
+-- Chase: walk to within half the chase distance of the leader once they're further than it. With no path from here (a
+-- spot the rest of the mesh doesn't connect to) walk straight at them until there is one: /nav did nothing and Seaeni
+-- stood 2200 away from the group for 12 minutes (2026-10-18 13:17)
 local function chaseFollow()
     if S.mode ~= 'Chase' then return end
     local c = leadSpawn()
-    if c and (c.Distance() or 0) > S.chaseDist and not mq.TLO.Navigation.Active() then
-        mq.cmdf('/nav id %d distance=%d', c.ID(), math.max(10, math.floor(S.chaseDist / 2)))
+    if not c or (c.Distance() or 0) <= S.chaseDist or mq.TLO.Navigation.Active() then return end
+    local near = math.max(10, math.floor(S.chaseDist / 2))
+    if R.chaseStraightAt and mq.gettime() - R.chaseStraightAt < 3000 then return end   -- walking straight: look again every 3s
+    if not mq.TLO.Navigation.PathExists('id ' .. c.ID())() then
+        if not R.chaseStraightAt then log('no path to %s - walking straight at them', c.CleanName()) end
+        R.chaseStraightAt = mq.gettime()
+        mq.cmdf('/moveto id %d mdist %d', c.ID(), near)
+        return
     end
+    if R.chaseStraightAt then R.chaseStraightAt = nil; mq.cmd('/moveto off'); log('path to %s again', c.CleanName()) end
+    mq.cmdf('/nav id %d distance=%d', c.ID(), near)
 end
 
 -- one tick of the state machine -----------------------------------------------------------
@@ -2774,6 +2962,7 @@ local function fightTick()
     if keepMobsInFront(t) then return end
     if doTank(t) then return end
     if doShed(t) then return end
+    if FIGHT.petGuard() then return end
     if doDuties(t) then return end
     if doBurn(t) then return end
     if doEndurance() then return end   -- in a fight only its mana part acts (shard, Mana abilities)
@@ -3669,7 +3858,9 @@ function draw()
                 S.petSpell = ImGui.InputText('Pet summon', S.petSpell)
                 S.usePet = ImGui.Checkbox('Use pet', S.usePet)
                 S.nukeManaMin = ImGui.SliderInt('Nuke above mana %', S.nukeManaMin, 0, 100)
-                tip('Under it only lifetaps are cast (they heal).')
+                tip('Under it only lifetaps are cast (they heal). Under Gift of Mana (the next spell is free) any mana will do.')
+                S.dotManaMin = ImGui.SliderInt('DoTs above mana %', S.dotManaMin, 0, 100)
+                tip('DoTs (not lifetaps) wait under this.')
                 listInput('Mana spells (Gather Zeal, Traumatic Exchange)', 'manaSpells')
                 S.manaPct = ImGui.SliderInt('Mana tools below mana %', S.manaPct, 10, 95)
                 tip('Mana spells, Mana abilities and Modulation Shards under this.\nOne that costs health keeps 20% HP back (30% in a fight).')
@@ -3705,7 +3896,9 @@ function draw()
                 if ImGui.Button('Burn now (60s)') then R.burnUntil = mq.gettime() + 60000; log('burn: manual, 60s') end
                 S.burnNamed = ImGui.Checkbox('Burn on named', S.burnNamed); ImGui.SameLine()
                 S.burnLevel = ImGui.Checkbox('Burn at/above my level', S.burnLevel); ImGui.SameLine()
-                S.burnAdds = ImGui.Checkbox('Burn on 3+ mobs', S.burnAdds)
+                S.burnAdds = ImGui.Checkbox('Burn on mobs:', S.burnAdds); ImGui.SameLine(); ImGui.SetNextItemWidth(110)
+                S.burnCount = ImGui.SliderInt('##burnCount', S.burnCount, 2, 10)
+                tip('Burn once this many mobs are on the extended target list.')
                 S.defPct = ImGui.SliderInt('Defense below HP %', S.defPct, 10, 90)
                 tip('Defense (mitigate) abilities below this. Sustained ones (Carapace, Mantle) also while tanking a named or 2+ mobs.')
                 S.panicPct = ImGui.SliderInt('Panic below HP %', S.panicPct, 5, 60)
@@ -3759,7 +3952,8 @@ function draw()
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem('Log') then
-                for i = math.max(1, #R.log - 30), #R.log do ImGui.TextWrapped(R.log[i]) end
+                -- newest on top
+                for i = #R.log, math.max(1, #R.log - 30), -1 do ImGui.TextWrapped(R.log[i]) end
                 ImGui.EndTabItem()
             end
             ImGui.EndTabBar()
