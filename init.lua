@@ -33,7 +33,7 @@ local S = {
     nukes = '', nukeManaMin = 30, dotManaMin = 40, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
     combatBuffs = 'Yaulp', stunCooldown = true, keepInFront = true,
     avoidMobs = true, avoidRadius = 100, pullVer = 0, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
-    style = 'Auto', castRange = 100, mez = '', dots = '', twincastNukes = '', itNukes = '', debuffs = '', petSpell = '', usePet = true, shrinkPet = true, class = '',
+    style = 'Auto', castRange = 100, mez = '', dots = '', twincastNukes = '', itNukes = '', debuffs = '', petSpell = '', usePet = true, shrinkPet = true, chaseLoot = true, class = '',
     songs = '', restSongs = '', songManaMin = 10, fillVer = 0, swapGem = false,
     tankBuffs = '', manaSpells = '', manaPct = 50, userLists = {}, rezDone = {},
     defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true, burnCount = 5,
@@ -1466,15 +1466,36 @@ function DEB.list()
     return out
 end
 
+-- the kinds of debuff my target wears, from the target window: every caster's, so a shaman's malo counts for the mage
+-- (both malo'd every mob). Read again every 2s; nil for a mob that isn't my target (only my own record counts there)
+function DEB.worn(m)
+    local t = mq.TLO.Target
+    if not (t() and t.ID() == m.ID() and t.BuffsPopulated()) then return nil end
+    if R.wornId == m.ID() and mq.gettime() - (R.wornAt or 0) < 2000 then return R.worn end
+    local kinds = {}
+    for i = 1, (t.BuffCount() or 0) do
+        local n = t.Buff(i).Name()
+        local sp = n and mq.TLO.Spell(n)
+        if sp and sp() then kinds[DEB.kind(sp)] = true end
+    end
+    R.worn, R.wornId, R.wornAt = kinds, m.ID(), mq.gettime()
+    return kinds
+end
+
 function DEB.has(m, dl, kind)
+    local worn = DEB.worn(m)
+    if worn and worn[kind] then return true end
     for _, e in ipairs(dl) do if e.kind == kind and onMob(m, e.spell) then return true end end
     return false
 end
 
+-- an ability's debuff counts as on the mob for its duration; one whose own spell lasts 0s only casts the real debuff
+-- (Malaise X -> Malosinetra, 20 minutes): 2 minutes. At the 15s floor Malaise went out every 15s on the same mob
 function DEB.on(m, e, why)
     if not e.abil then return castOnMob(e.spell, m, why) end
     if not useAbility(e.abil, m.ID(), why) then return false end
-    R.mobCast[m.ID() .. '|' .. e.spell] = mq.gettime() + math.min(120, math.max(15, mq.TLO.Spell(e.spell).Duration.TotalSeconds() or 15)) * 1000
+    local dur = mq.TLO.Spell(e.spell).Duration.TotalSeconds() or 0
+    R.mobCast[m.ID() .. '|' .. e.spell] = mq.gettime() + (dur > 0 and math.min(120, math.max(15, dur)) or 120) * 1000
     return true
 end
 
@@ -2260,6 +2281,51 @@ local function doBuffs()
     return restoreGem()
 end
 
+-- chase loot (chaseloot.lua: Night of Shadows' Blood-soaked items): rare tradeable drops worth selling. Out of a fight, every 3s, from the Advanced Loot
+-- window: my own personal chase drops are looted, and the group leader gives the shared ones to himself. Nothing else
+-- is touched. An item is tried once a minute (a lore one I already carry would otherwise be retried in a loop)
+do
+local CHASE, tried = nil, {}
+local function isChase(name)
+    if not CHASE then
+        local ok, t = pcall(dofile, mq.luaDir .. '/autoxp/chaseloot.lua')
+        CHASE = ok and type(t) == 'table' and t or { patterns = {}, named = {}, never = {} }
+        if not ok then log('chase loot list failed to load: %s', tostring(t)) end
+    end
+    local l = name:lower()
+    if CHASE.never[l] then return false end
+    if CHASE.named[l] then return true end
+    for _, p in ipairs(CHASE.patterns) do if l:find(p) then return true end end
+    return false
+end
+function FIGHT.chaseLoot()
+    if not S.chaseLoot or mq.gettime() - (R.lootAt or 0) < 3000 or casting() or #hostiles() > 0 then return false end
+    R.lootAt = mq.gettime()
+    local al, now = mq.TLO.AdvLoot, mq.gettime()
+    if al.LootInProgress() then return false end
+    for i = 1, (al.PCount() or 0) do
+        local n = al.PList(i).Name()
+        if n and now - (tried['p' .. n] or 0) > 60000 and isChase(n) then
+            tried['p' .. n] = now
+            mq.cmdf('/advloot personal %d loot', i)
+            log('chase loot: %s', n)
+            return true
+        end
+    end
+    if mq.TLO.Group.Leader.Name() ~= ME then return false end   -- the leader hands out the shared loot
+    for i = 1, (al.SCount() or 0) do
+        local n = al.SList(i).Name()
+        if n and now - (tried['s' .. n] or 0) > 60000 and isChase(n) then
+            tried['s' .. n] = now
+            mq.cmdf('/advloot shared %d giveto %s', i, ME)
+            log('chase loot: %s (shared, to me)', n)
+            return true
+        end
+    end
+    return false
+end
+end
+
 -- pet classes: summon the best pet in the book (mages: water first) and keep the best pet buff of each line
 -- on it (haste, misc, block: 10 min+). A gem is borrowed for any that isn't memorized
 local petBook, doPetCare
@@ -2808,6 +2874,34 @@ local function atTank(t)
     return mq.gettime() - R.assistSeenAt >= 6000
 end
 
+-- the mobs a walk to a pull passes: NPCs within the alone radius of the walking route (MQ2Nav's path points), on the
+-- same level (30 up or down), other than the pull itself and the ones next to it (its company, counted apart). Walking
+-- the group past them dragged them along to the pull. mobs = { {id, x, y, z, name} } read once per look; returns their
+-- names, or nil when MQ2Nav gives no path points (not checked)
+function FIGHT.routeBlockers(c, mobs)
+    local s = mq.TLO.Navigation.PathPoints('id ' .. c.id)()
+    if not s or s == '' then return nil end
+    local pts = {}
+    for x, y, z in s:gmatch('(-?[%d.]+),(-?[%d.]+),(-?[%d.]+)') do pts[#pts + 1] = { tonumber(x), tonumber(y), tonumber(z) } end
+    local r, out = S.avoidRadius, {}
+    for _, m in ipairs(mobs) do
+        local dx, dy = m.x - c.x, m.y - c.y
+        if m.id ~= c.id and (dx * dx + dy * dy > r * r or math.abs(m.z - c.z) > 40) then
+            for k = 1, #pts - 1 do
+                local a, b = pts[k], pts[k + 1]
+                local sx, sy = b[1] - a[1], b[2] - a[2]
+                local l2 = sx * sx + sy * sy
+                local f = l2 > 0 and math.max(0, math.min(1, ((m.x - a[1]) * sx + (m.y - a[2]) * sy) / l2)) or 0
+                local ex, ey = m.x - a[1] - f * sx, m.y - a[2] - f * sy
+                if ex * ex + ey * ey < r * r and math.abs(m.z - (a[3] + (b[3] - a[3]) * f)) < 30 then
+                    out[#out + 1] = m.name; break
+                end
+            end
+        end
+    end
+    return out
+end
+
 local function pickTarget()
     -- anything already on us comes first (priority order); a non-tank following the group waits for it to reach the tank
     R.pendingDetour, R.pullCandidate = nil, false
@@ -2845,8 +2939,9 @@ local function pickTarget()
         R.lastHunt = mq.gettime()
         local q = string.format('npc range %d %d radius %d noalert 1 targetable', S.minlvl, S.maxlvl, S.radius)
         -- every mob in level range within the pull radius, by walking distance (NearestSpawn is 2D, so check the
-        -- path): the one with the fewest other NPCs within avoidRadius of it (alone first), then the closest
-        local best, bestKey
+        -- path), ranked by the fewest other NPCs within avoidRadius of it (alone first), then the closest. The first
+        -- whose route passes no other mob is pulled; with none clear, no pull (mobs wander and respawn: look again)
+        local cands = {}
         local npcs = findable()
         for i = 1, math.min(mq.TLO.SpawnCount(q)() or 0, 40) do
             local s = mq.TLO.NearestSpawn(i, q)
@@ -2856,20 +2951,44 @@ local function pickTarget()
                 local len = mq.TLO.Navigation.PathLength('id ' .. id)() or -1
                 if len < 0 then R.skip[id] = mq.gettime() + 30000                     -- off the navmesh
                 elseif len <= S.radius then
-                    local near = (mq.TLO.SpawnCount(string.format('npc loc %.0f %.0f %.0f radius %d zradius 40',
-                        s.X(), s.Y(), s.Z(), S.avoidRadius))() or 1) - 1
-                    local key = near * 1e6 + len
-                    if not bestKey or key < bestKey then best, bestKey = { id = id, len = len, near = near, name = s.CleanName() }, key end
+                    -- (the mob itself can miss the count: "-1 other(s)")
+                    local near = math.max(0, (mq.TLO.SpawnCount(string.format('npc loc %.0f %.0f %.0f radius %d zradius 40',
+                        s.X(), s.Y(), s.Z(), S.avoidRadius))() or 1) - 1)
+                    table.insert(cands, { id = id, len = len, near = near, name = s.CleanName(), x = s.X() or 0, y = s.Y() or 0,
+                        z = s.Z() or 0, key = near * 1e6 + len })
                 end
             end
         end
-        if not best then
+        if #cands == 0 then
             if mq.gettime() - R.noRouteAt > 30000 then log('no mobs to pull within %d', S.radius); R.noRouteAt = mq.gettime() end
             return nil
         end
-        log('closest pull: %s, %.0f away, %s', best.name or '?', best.len, best.near == 0 and 'alone' or (best.near .. ' other(s) next to it'))
-        R.pullCandidate = true
-        return best.id
+        table.sort(cands, function(a, b) return a.key < b.key end)
+        -- every NPC a route could pass (the route stays within the pull radius of me), grey ones and Find Window NPCs aside
+        local mobs, rq = {}, string.format('npc radius %d', S.radius + S.avoidRadius)
+        for i = 1, math.min(mq.TLO.SpawnCount(rq)() or 0, 100) do
+            local m = mq.TLO.NearestSpawn(i, rq)
+            if not m() then break end
+            if m.ConColor() ~= 'GREY' and not npcs[(m.CleanName() or ''):lower()] then
+                table.insert(mobs, { id = m.ID(), x = m.X() or 0, y = m.Y() or 0, z = m.Z() or 0, name = m.CleanName() or '?' })
+            end
+        end
+        local blocked = {}
+        for _, c in ipairs(cands) do
+            local b = FIGHT.routeBlockers(c, mobs)
+            if not b or #b == 0 then
+                if R.routeWait then log('a clear route again'); R.routeWait = nil end
+                log('closest pull: %s, %.0f away, %s', c.name or '?', c.len, c.near == 0 and 'alone' or (c.near .. ' other(s) next to it'))
+                R.pullCandidate = true
+                return c.id
+            end
+            if #blocked < 3 then table.insert(blocked, string.format('%s past %s', c.name or '?', table.concat(b, ', '))) end
+        end
+        if mq.gettime() - (R.routeWait or 0) > 30000 then
+            log('every pull within %d has mobs in the way - waiting (%s)', S.radius, table.concat(blocked, '; '))
+            R.routeWait = mq.gettime()
+        end
+        return nil
     else
         local who = S.mode == 'Assist' and groupLead(S.assistName, 'assist') or groupLead(S.chaseName, 'tank')
         if who == '' then return nil end
@@ -3147,6 +3266,7 @@ local function step()
             if memRestSongs() then return end
             if memHeals() then return end
         end
+        if FIGHT.chaseLoot() then return end
         if doPetCare() then return end
         if doPetWeapons() then return end
         if doRez() then return end
@@ -3158,6 +3278,7 @@ local function step()
     elseif st == 'REST' then
         if #hostiles() > 0 then mq.cmd('/stand'); setState('FIND'); return end
         if doRez() then return end
+        if FIGHT.chaseLoot() then return end
         if S.mode == 'Chase' then
             local lead = leadSpawn()
             if lead and (lead.Distance() or 0) > S.chaseDist then mq.cmd('/stand'); setState('FIND'); return end
@@ -3468,7 +3589,7 @@ do
         FLASK = '\xef\x83\x83', WARN = '\xef\x81\xb1', MAP = '\xef\x81\x81', PLAY = '\xef\x81\x8b',
         PAUSE = '\xef\x81\x8c', STOP = '\xef\x81\x8d', FEIGN = '\xef\x88\x9b', LOST = '\xef\x84\xa7' }
     local ICON = { invis = 18, ivu = 33, sick = 154 }   -- Invisibility, Invisibility versus Undead, Resurrection Sickness
-    local P = { status = '', at = 0, readAt = 0, rows = {}, observing = {}, tried = {}, beat = {} }
+    local P = { status = '', at = 0, readAt = 0, rows = {}, observing = {}, tried = {}, beat = {}, redo = {} }
     local anim
 
     local function buildStatus()
@@ -3540,6 +3661,13 @@ do
                     local d = parse(mq.TLO.DanNet(peer).Observe('AutoXP')())
                     local b = P.beat[peer]
                     if d and (not b or b.v ~= d.beat) then P.beat[peer] = { v = d.beat, at = now } end
+                    -- a peer whose client restarted keeps its old observer here, frozen at the last status (Nhambuko
+                    -- showed offline after reconnecting): one unchanged for 20s is dropped (at most every 30s) and set
+                    -- up again 10s later
+                    if P.observing[peer] and now - (P.beat[peer] and P.beat[peer].at or now) > 20000 and now - (P.redo[peer] or 0) > 30000 then
+                        P.redo[peer], P.observing[peer], P.tried[peer] = now, nil, now
+                        mq.cmdf('/dobserve %s -q AutoXP -drop', peer)
+                    end
                     local n = peer:gsub('^[^_]*_', '')
                     table.insert(rows, { name = n:sub(1, 1):upper() .. n:sub(2), d = d,
                         fresh = d ~= nil and now - (P.beat[peer] and P.beat[peer].at or 0) < 15000 })
@@ -3926,7 +4054,7 @@ function draw()
                 S.maxlvl = ImGui.SliderInt('Max level', S.maxlvl, S.minlvl, 130)
                 S.radius = ImGui.SliderInt('Pull radius', S.radius, 100, 5000)
                 S.avoidRadius = ImGui.SliderInt('Alone radius', S.avoidRadius, 40, 200)
-                tip('Hunter pulls the closest mob in level range within the pull radius, preferring one with no other NPC this close to it.')
+                tip('Hunter pulls the closest mob in level range within the pull radius, preferring one with no other NPC this close to it, and only one whose walking route passes no other mob this close.')
                 ImGui.SetNextItemWidth(110)
                 local pm = combo('Pull with', S.pullMethod, PULLS)
                 if pm ~= S.pullMethod then S.pullMethod = pm; log('pull with %s', pm) end
@@ -3965,6 +4093,8 @@ function draw()
                 S.petSpell = ImGui.InputText('Pet summon', S.petSpell)
                 S.usePet = ImGui.Checkbox('Use pet', S.usePet)
                 ImGui.SameLine(); S.shrinkPet = ImGui.Checkbox('Shrink pet', S.shrinkPet)
+                S.chaseLoot = ImGui.Checkbox('Chase loot', S.chaseLoot)
+                tip('Out of fights: loot my own chase drops (chaseloot.lua) from Advanced Loot; the group leader also gives the shared ones to himself.')
                 tip('Shrink each new pet (Diminutive Companion, Shrink) down to the smallest it goes, out of fights.')
                 S.nukeManaMin = ImGui.SliderInt('Nuke above mana %', S.nukeManaMin, 0, 100)
                 tip('Under it only lifetaps are cast (they heal). Under Gift of Mana (the next spell is free) any mana will do.')

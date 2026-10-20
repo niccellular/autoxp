@@ -41,7 +41,9 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   change; "Fill from memorized gems" refills them all.
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
-  walking distance, and holds pulls while anyone is under "Rest below %" HP, a healer, CC or nuker (CLR, DRU, SHM,
+  walking distance, but only one whose walking route passes no other mob within the alone radius (grey ones and Find
+  Window NPCs aside): a route past other mobs drags them along. With no clear route it waits and looks again (the log
+  names the mobs in the way). It holds pulls while anyone is under "Rest below %" HP, a healer, CC or nuker (CLR, DRU, SHM,
   ENC, BRD, MAG, WIZ, NEC) is under it in mana (a bard: under 20%), a groupmate is casting its buffs (up to 60s each; a bard's songs
   don't count) or a groupmate is walking to or resurrecting a corpse (up to 3 minutes each).
   NPCs listed in the zone's Find Window (quest givers, merchants, bankers) are never hunted.
@@ -103,6 +105,10 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   the best rez spell, once per corpse (remembered for 3 hours across reloads). Out of combat it walks on the mesh to
   any group member's corpse in the zone (and its own), giving up on one after 90s; the Hunter tank holds its pulls
   meanwhile.
+- **Chase loot:** out of fights, every 3s, from the Advanced Loot window: each character loots its own personal
+  chase drops and the group leader gives the shared ones to himself ("Chase loot", on by default). What counts is in
+  `chaseloot.lua` (name patterns, exact item names, never-loot): Night of Shadows' "Blood-soaked ..." items. Nothing
+  else is looted.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under
