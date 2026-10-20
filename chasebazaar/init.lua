@@ -188,8 +188,14 @@ if not ensureWindow() then log('could not open the Bazaar search window (/bazaar
 local terms = searchTerms()
 log('start%s%s: %d searches a pass, cap %dpp, %d item(s) bought before', DRY and ' (dry run)' or '', ONCE and ' (one pass)' or '',
     #terms, MAX_PRICE_PP, (function() local n = 0 for _ in pairs(bought) do n = n + 1 end return n end)())
+-- a pass that errors is logged and the next one starts on time (the window is opened again if it was closed): the
+-- script stopped silently once after 45 minutes with the search window shut
 while running do
-    pass(terms)
+    if not ensureWindow() then log('the Bazaar search window would not open - trying again next pass')
+    else
+        local ok, err = pcall(pass, terms)
+        if not ok then log('pass failed: %s', tostring(err)) end
+    end
     if ONCE or not running then break end
     log('next pass in %ds', PASS_GAP_S)
     mq.delay(PASS_GAP_S * 1000, function() return not running end)

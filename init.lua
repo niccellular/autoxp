@@ -2281,16 +2281,21 @@ local function doBuffs()
     return restoreGem()
 end
 
--- chase loot (chaseloot.lua: Night of Shadows' Blood-soaked items): rare tradeable drops worth selling. Out of a fight, every 3s, from the Advanced Loot
+-- chase loot (chaseloot.lua: Night of Shadows' Blood-soaked items, Deepshade named gear): rare drops worth keeping. Out of a fight, every 3s, from the Advanced Loot
 -- window: my own personal chase drops are looted, and the group leader gives the shared ones to himself. Nothing else
 -- is touched. An item is tried once a minute (a lore one I already carry would otherwise be retried in a loop)
 do
-local CHASE, tried = nil, {}
+local CHASE, chaseAt, tried = nil, 0, {}
 local function isChase(name)
-    if not CHASE then
+    -- read again every minute: edits to chaseloot.lua apply without a reload (a broken edit keeps the last good list)
+    if not CHASE or mq.gettime() - chaseAt > 60000 then
+        chaseAt = mq.gettime()
         local ok, t = pcall(dofile, mq.luaDir .. '/autoxp/chaseloot.lua')
-        CHASE = ok and type(t) == 'table' and t or { patterns = {}, named = {}, never = {} }
-        if not ok then log('chase loot list failed to load: %s', tostring(t)) end
+        if ok and type(t) == 'table' then CHASE = t
+        else
+            log('chase loot list failed to load: %s', tostring(t))
+            CHASE = CHASE or { patterns = {}, named = {}, never = {} }
+        end
     end
     local l = name:lower()
     if CHASE.never[l] then return false end
@@ -2779,9 +2784,18 @@ local function pullHold(travel)
     return nil
 end
 
--- the hunt-zone trip waits for the same things (not for members who are elsewhere)
+-- the hunt-zone trip waits for the same things (not for members who are elsewhere), for my own mana too, and never
+-- leaves groupmates behind: Chase followers don't follow into another zone. Ramakrr respawned in the Guild Lobby with
+-- the group, set off for Deepshade alone at 10% mana and died on the way (2026-10-19 22:36)
 local function travelHeld()
     local hold = pullHold(true)
+    if not hold and (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < S.restPct then hold = string.format('I am at %d%% mana', mana()) end
+    if not hold then
+        for i = 1, (mq.TLO.Group.Members() or 0) do
+            local m = mq.TLO.Group.Member(i)
+            if m.Present() and not m.OtherZone() then hold = (m.Name() or '?') .. ' is here and would stay behind'; break end
+        end
+    end
     if hold and hold ~= R.travelWhy then log('not traveling yet: %s', hold) end
     R.travelWhy = hold   -- its own field: sharing the pull hold's made both log every tick
     return hold ~= nil

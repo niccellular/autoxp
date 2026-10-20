@@ -39,6 +39,8 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   spells, nukes and lifetaps, DoTs, slows, mez, mana spells, pet, buffs); casters and priests fight from range.
   A list you edit (Spells / Healing tabs, or the settings file's `userLists`) stays as you wrote it when the gems
   change; "Fill from memorized gems" refills them all.
+- **Hunt-zone travel:** a Hunter in the wrong zone travels to its hunt zone only with its own HP and mana above "Rest
+  below %", and never while a groupmate is in the same zone (Chase followers don't follow into another zone).
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
   walking distance, but only one whose walking route passes no other mob within the alone radius (grey ones and Find
@@ -107,8 +109,8 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   meanwhile.
 - **Chase loot:** out of fights, every 3s, from the Advanced Loot window: each character loots its own personal
   chase drops and the group leader gives the shared ones to himself ("Chase loot", on by default). What counts is in
-  `chaseloot.lua` (name patterns, exact item names, never-loot): Night of Shadows' "Blood-soaked ..." items. Nothing
-  else is looted.
+  `chaseloot.lua` (name patterns, exact item names, never-loot): Night of Shadows' "Blood-soaked ..." items and
+  Deepshade's named gear. Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under
