@@ -7,7 +7,7 @@ MacroQuest Lua automation for leveling: finds and pulls mobs, fights, heals, res
 Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 
 ```
-/lua run autoxp [zone]
+/lua run autoxp [zone]          (travels to the zone)
 /autoxp start|stop|pause|resume|show|scan|spells|save
 /autoxp mode <Manual|Hunter|Assist|Chase>
 /autoxp role <tank|dps>
@@ -16,31 +16,41 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp hud            (show / hide the HUD)
 /autoxp backup [on|off]          (backup tank)
 /autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
+/autoxp travel [zone]            (travel there, the whole group with "Whole group" on)
+/autoxp travel stop
 ```
 
 Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goes to `<MQ>/lua/autoxp_log_<Name>.txt`.
 
 ## Requires
 
-- MQ2Nav with meshes for the zones you hunt, MQ2MoveUtils, MQ2EasyFind (travel to the hunt zone).
+- MQ2Nav with meshes for the zones you hunt, MQ2MoveUtils, MQ2EasyFind (travel).
 
 ## What it does
 
-- **Modes:** Hunter (finds mobs in a level range and radius), Assist, Chase, Manual. The hunt zone is the zone the
-  character is in whenever AutoXP starts or Hunter is switched on; picking another in the window while running
-  travels there (and `/lua run autoxp <zone>` travels there on the first start).
+- **Modes:** Hunter (finds mobs in a level range and radius, in the zone it is in), Assist, Chase, Manual.
 - **Role:** Tank (front, taunt, stun-lock, target priority, keeps mobs in front) or DPS (behind or at range).
   Duties are separate toggles: Heal, CC, Debuff, Nuke, DoT, Buff, Rez (e.g. a healer can opt out of nukes or DoTs).
   **Backup** (backup tank): while the group main tank is dead or out of the zone, this character tanks in its place
   (Tank role), and goes back to its own role once the main tank is alive and the fight is over.
   Non-tanks in Chase / Assist join a pulled mob once it has reached the main tank (or after 6s), so they don't
-  pull it off the tank on the way in.
+  pull it off the tank on the way in. Following the group main assist, they fight its target whenever it is on their
+  extended target list (first pick, next add, and when it switches mid-fight), not their own priority pick.
 - **Class setup:** scans skills, disciplines and class AAs; fills spell lists from memorized gems (heals, stuns and hate
   spells, nukes and lifetaps, DoTs, slows, mez, mana spells, pet, buffs); casters and priests fight from range.
   A list you edit (Spells / Healing tabs, or the settings file's `userLists`) stays as you wrote it when the gems
   change; "Fill from memorized gems" refills them all.
-- **Hunt-zone travel:** a Hunter in the wrong zone travels to its hunt zone only with its own HP and mana above "Rest
-  below %", and never while a groupmate is in the same zone (Chase followers don't follow into another zone).
+- **Travel** (Travel tab, `/autoxp travel <zone>`): EasyFind to a zone, in any mode, AutoXP started or not. A trip
+  leaves once nothing holds it back: no fight, HP and mana above "Rest below %", no resurrection sickness, nobody in
+  the group dead or low, no corpse here waiting for a rez. On the way it only heals, mezzes and defends; the Hunter
+  doesn't pull while a trip waits. **Whole group** sends Travel and Stop to every group member (DanNet `/dggexecute`);
+  each leaves once its own holds clear, and the Hunter pulls only once everyone is in the zone. **Return after death**
+  (off by default): alive again in another zone after a death (a respawn at the bind point), travel back to the zone
+  it died in, or on to the trip it was on.
+- **Guild Lobby corpse summon:** alive again in the Guild Lobby within 3 hours of a death elsewhere, a character walks
+  to the nearest Priestess of Luclin and says Summon (3 tries), then waits up to 3 minutes for a rez before a trip
+  leaves. A character with the Rez duty holds its own trip until the group's corpses there are resurrected (5 minutes
+  each at most).
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
   walking distance, but only one whose walking route passes no other mob within the alone radius (grey ones and Find
@@ -108,9 +118,12 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   any group member's corpse in the zone (and its own), giving up on one after 90s; the Hunter tank holds its pulls
   meanwhile.
 - **Chase loot:** out of fights, every 3s, from the Advanced Loot window: each character loots its own personal
-  chase drops and the group leader gives the shared ones to himself ("Chase loot", on by default). What counts is in
+  chase drops and the group leader hands out the shared ones ("Chase loot", on by default): tradeable ones to himself,
+  No Trade ones to a group member of a class that can use them (the classes are listed with the item; the member given
+  fewest of that item so far, skipping one who didn't take it). What counts is in
   `chaseloot.lua` (name patterns, exact item names, never-loot): Night of Shadows' "Blood-soaked ..." items and
-  Deepshade's named gear. Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
+  Deepshade's named gear, Laurion's Song's "... of Memoryforged Desolation" items, the tradeable named gear of Laurion
+  Inn, Timorous Falls and Ankexfen Keep, the No Trade named gear of the LS tier 2 zones, and LS named power sources. Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under

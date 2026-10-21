@@ -1,7 +1,7 @@
 -- autoxp: group automation with ImGui front end.
 -- Modes: Hunter (find+pull), Assist (MA's target), Chase (follow a toon), Manual (act on own target).
 -- Role: Tank or DPS; duties: Heal, CC. Abilities, spell lists and melee/ranged style follow the character's class.
--- /lua run autoxp [zone]   then /autoxp start|stop|pause|resume|show|scan|spells|mode <m>|role <tank|dps>|heal|cc [on|off]
+-- /lua run autoxp [zone] (travels there)   then /autoxp start|stop|pause|resume|show|scan|spells|mode <m>|role <tank|dps>|heal|cc [on|off]|travel <zone|stop>
 local mq = require('mq')
 local ImGui = require('ImGui')
 
@@ -25,7 +25,7 @@ local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Eme
 -- settings (persisted) -------------------------------------------------------------------
 local S = {
     mode = 'Hunter', role = 'Tank', heal = true, cc = false, debuff = true, nuke = true, dot = true, buff = true, rez = false, ccStuns = '',
-    zone = 'southro', travel = true,
+    travelZone = '', travelGroup = true, travelReturn = false, lobbySummon = true, death = {},
     minlvl = 15, maxlvl = 25, radius = 1500,
     assistName = '', assistAt = 95, chaseName = '', chaseDist = 30,
     restPct = 50, restTo = 90,
@@ -56,7 +56,6 @@ do
     end
 end
 if S.role ~= 'Tank' and S.role ~= 'DPS' then S.role = 'Tank' end
-if args[1] then S.zone = args[1] end
 
 -- runtime ---------------------------------------------------------------------------------
 local R = {
@@ -64,7 +63,7 @@ local R = {
     state = 'IDLE', stateSince = 0, targetId = 0, targetName = '', kills = 0,
     xp0 = 0, aa0 = 0, started = 0, log = {}, opened = false, lastAssist = 0,
     attacking = false, lastSwitch = 0, lastReposition = 0, zoneFilter = '',
-    travelTarget = '', travelTries = 0, lastMoveAt = 0, lastPos = nil, mezzed = {}, petTarget = 0,
+    mezzed = {}, petTarget = 0,
     skip = {}, lastNav = 0, fightZone = '', waypoint = nil, pendingDetour = nil,
     pull = nil, pullCandidate = false, pullWait = nil, holdUntil = 0, lastFace = 0, lastMemCheck = 0, pullTries = 0,
     ourTarget = 0, pickId = 0, swapGem = nil, buffLevel = 0, nukeLevel = 0, nukeDebuff = nil,
@@ -93,6 +92,7 @@ local function myId() return mq.TLO.Me.ID() or 0 end
 local function totalXp() return (mq.TLO.Me.Level() or 0) * 100 + (mq.TLO.Me.PctExp() or 0) end
 local DPS = {}   -- damage and session stats, filled in by the DPS section (before the UI)
 local FIGHT = {}   -- fight rules (AE, disciplines, turns, reagents, combat and tank buffs), filled in after the helpers they use
+local TRIP = {}   -- travel (the Travel tab, /autoxp travel), filled in after the pull holds it shares
 local function casting()
     -- a bard keeps "casting" the song it holds; only the cast bar means busy
     if mq.TLO.Me.Class.ShortName() == 'BRD' then return mq.TLO.Window('CastingWindow').Open() == true end
@@ -1034,7 +1034,7 @@ end
 
 local function stopAll(reason)
     attackOff(); mq.cmd('/stick off'); mq.cmd('/nav stop'); petBackOff()
-    if R.state == 'TRAVEL' then mq.cmd('/travelto stop') end
+    TRIP.stop('AutoXP stopped')
     if R.swapGem and R.swapGem.name ~= '' then mq.cmdf('/memspell %d "%s"', R.swapGem.g, R.swapGem.name) end
     if R.cast then R.cast.resume(); R.cast = nil end
     R.running = false; R.paused = false; R.targetId, R.pickId, R.swapGem = 0, 0, nil
@@ -1044,20 +1044,12 @@ local function stopAll(reason)
     log('stopped: %s', reason or 'user')
 end
 
--- the hunt zone is the zone I'm in, whenever AutoXP starts or Hunter is switched on (a zone given on the command
--- line, /lua run autoxp <zone>, holds for the first start: it travels there)
-local function huntHere()
-    local here = mq.TLO.Zone.ShortName() or ''
-    if here ~= '' and here ~= S.zone then S.zone = here; log('hunt zone %s (the zone I am in)', here) end
-end
-
 local function start()
-    if args[1] and not R.argZone then R.argZone = true else huntHere() end
     R.running, R.paused, R.kills, R.nukeLevel, R.healMemLevel, R.lastRoles, R.rolesWarned = true, false, 0, 0, -1, 0, false
     R.xp0, R.aa0, R.started = totalXp(), mq.TLO.Me.PctAAExp() or 0, mq.gettime()
     log('start: mode=%s role=%s heal=%s cc=%s debuff=%s nuke=%s dot=%s buff=%s rez=%s zone=%s', S.mode, S.role, S.heal and 'on' or 'off',
         S.cc and 'on' or 'off', S.debuff and 'on' or 'off', S.nuke and 'on' or 'off', S.dot and 'on' or 'off', S.buff and 'on' or 'off',
-        S.rez and 'on' or 'off', S.zone)
+        S.rez and 'on' or 'off', mq.TLO.Zone.ShortName() or '?')
     autoSetup()
     if S.swapGem and not R.swapGem then R.swapGem = { g = S.swapGem.g, name = S.swapGem.name } end
     if S.fillVer ~= FILLVER then fillFromGems() end
@@ -1071,7 +1063,7 @@ local function start()
     if #S.abilities == 0 then local ok, err = pcall(scanAbilities); if not ok then log('scan failed: %s', tostring(err)) end end
     save()
     updateMapRadius()
-    setState('BUFF')   -- a Hunter in the wrong zone travels from step(), once nothing holds it back
+    setState('BUFF')
 end
 
 -- target priority (tank): casters > healers > hybrids > melee -------------------------------
@@ -2281,11 +2273,13 @@ local function doBuffs()
     return restoreGem()
 end
 
--- chase loot (chaseloot.lua: Night of Shadows' Blood-soaked items, Deepshade named gear): rare drops worth keeping. Out of a fight, every 3s, from the Advanced Loot
--- window: my own personal chase drops are looted, and the group leader gives the shared ones to himself. Nothing else
--- is touched. An item is tried once a minute (a lore one I already carry would otherwise be retried in a loop)
+-- chase loot (chaseloot.lua: Night of Shadows' and Laurion's Song's chase lines and named gear): rare drops worth keeping. Out of a fight, every 3s, from the Advanced Loot
+-- window: my own personal chase drops are looted (a No Trade one only by a class that can use it), and the group leader
+-- hands out the shared ones: a tradeable one to himself, a No Trade one (its classes in chaseloot.lua) to a group member
+-- of a class that can use it - the one given fewest of it so far, skipping one who didn't take it (lore: has one).
+-- Nothing else is touched. An item is tried once a minute (a lore one I already carry would otherwise be retried in a loop)
 do
-local CHASE, chaseAt, tried = nil, 0, {}
+local CHASE, chaseAt, tried, given, lastTo, refused, noOne = nil, 0, {}, {}, {}, {}, {}
 local function isChase(name)
     -- read again every minute: edits to chaseloot.lua apply without a reload (a broken edit keeps the last good list)
     if not CHASE or mq.gettime() - chaseAt > 60000 then
@@ -2299,9 +2293,27 @@ local function isChase(name)
     end
     local l = name:lower()
     if CHASE.never[l] then return false end
-    if CHASE.named[l] then return true end
+    if CHASE.named[l] then return CHASE.named[l] end
     for _, p in ipairs(CHASE.patterns) do if l:find(p) then return true end end
     return false
+end
+-- a No Trade item's classes ('ALL' or e.g. 'BER MNK WAR'): can this class use it
+local function usable(classes, cls) return classes == 'ALL' or (' ' .. classes .. ' '):find(' ' .. cls .. ' ', 1, true) ~= nil end
+-- who gets a shared No Trade item: a group member here of a class that can use it, given fewest of it, not one who
+-- didn't take it before
+local function recipient(item, classes)
+    local best, bc
+    for i = 0, (mq.TLO.Group.Members() or 0) do
+        local m = i > 0 and mq.TLO.Group.Member(i) or nil
+        local n = m and m.Name() or ME
+        local cls = m and m.Class.ShortName() or mq.TLO.Me.Class.ShortName() or ''
+        local here = not m or (m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse')
+        if n and here and usable(classes, cls) and not refused[item .. '|' .. n] then
+            local c = given[item .. '|' .. n] or 0
+            if not best or c < bc then best, bc = n, c end
+        end
+    end
+    return best
 end
 function FIGHT.chaseLoot()
     if not S.chaseLoot or mq.gettime() - (R.lootAt or 0) < 3000 or casting() or #hostiles() > 0 then return false end
@@ -2310,7 +2322,8 @@ function FIGHT.chaseLoot()
     if al.LootInProgress() then return false end
     for i = 1, (al.PCount() or 0) do
         local n = al.PList(i).Name()
-        if n and now - (tried['p' .. n] or 0) > 60000 and isChase(n) then
+        local want = n and now - (tried['p' .. n] or 0) > 60000 and isChase(n)
+        if want and (want == true or usable(want, mq.TLO.Me.Class.ShortName() or '')) then
             tried['p' .. n] = now
             mq.cmdf('/advloot personal %d loot', i)
             log('chase loot: %s', n)
@@ -2318,13 +2331,28 @@ function FIGHT.chaseLoot()
         end
     end
     if mq.TLO.Group.Leader.Name() ~= ME then return false end   -- the leader hands out the shared loot
+    -- a No Trade item gone from the list was taken; one still listed a minute after it was given wasn't
+    local listed = {}
+    for i = 1, (al.SCount() or 0) do listed[al.SList(i).Name() or ''] = true end
+    for n in pairs(lastTo) do if not listed[n] then lastTo[n] = nil end end
     for i = 1, (al.SCount() or 0) do
         local n = al.SList(i).Name()
-        if n and now - (tried['s' .. n] or 0) > 60000 and isChase(n) then
+        local want = n and now - (tried['s' .. n] or 0) > 60000 and isChase(n)
+        if want then
             tried['s' .. n] = now
-            mq.cmdf('/advloot shared %d giveto %s', i, ME)
-            log('chase loot: %s (shared, to me)', n)
-            return true
+            local to = ME
+            if want ~= true then
+                if lastTo[n] then refused[n .. '|' .. lastTo[n]] = true; log('chase loot: %s - %s did not take it', n, lastTo[n]) end
+                to = recipient(n, want)
+                lastTo[n] = to
+                if not to and not noOne[n] then noOne[n] = true; log('chase loot: %s (No Trade, %s) - nobody here to give it to', n, want) end
+            end
+            if to then
+                given[n .. '|' .. to] = (given[n .. '|' .. to] or 0) + 1
+                mq.cmdf('/advloot shared %d giveto %s', i, to)
+                log('chase loot: %s (shared, to %s)', n, to == ME and 'me' or to)
+                return true
+            end
         end
     end
     return false
@@ -2642,6 +2670,21 @@ function FIGHT.rezNow(name)
     return true
 end
 
+-- a trip waits for the corpses here I'd resurrect out of combat (a group member's or mine), up to 5 minutes each
+function FIGHT.rezPending()
+    if not S.rez or not canRez() then return nil end
+    R.rezWait = R.rezWait or {}
+    for i = 0, (mq.TLO.Group.Members() or 0) do
+        local n = i == 0 and ME or mq.TLO.Group.Member(i).Name()
+        local c = n and mq.TLO.Spawn('pccorpse ' .. n .. "'s corpse")
+        local cid = c and c() and c.ID() or 0
+        if cid > 0 and not rezzedBefore(c) and ((R.corpseSkip or {})[cid] or 0) < mq.gettime() then
+            R.rezWait[cid] = R.rezWait[cid] or mq.gettime()
+            if mq.gettime() - R.rezWait[cid] < 300000 then return (i == 0 and 'my corpse' or n .. "'s corpse") .. ' is waiting for my rez' end
+        end
+    end
+end
+
 function doRez()
     if not S.rez or FIGHT.keepInvis() then return false end
     local fight = #hostiles() > 0
@@ -2741,7 +2784,7 @@ local function followPick(st)
         return true
     end
     if S.mode == 'Manual' then return false end
-    if st == 'TRAVEL' then mq.cmd('/travelto stop') end
+    if R.trip and R.trip.going then mq.cmd('/travelto stop'); R.trip.going = false end   -- it sets off again after the fight
     if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
     local onUs = false
     for _, x in ipairs(hostiles()) do if x.ID() == t.ID() then onUs = true end end
@@ -2756,6 +2799,7 @@ local SICK = { 'Resurrection Sickness', 'Revival Sickness' }
 -- classes the Hunter waits for (mana under the rest %): healers, CC and the nukers (a nuker out of mana stops nuking)
 local HEALCC = { CLR = true, DRU = true, SHM = true, ENC = true, BRD = true, MAG = true, WIZ = true, NEC = true }
 local function pullHold(travel)
+    if not travel and R.trip then return 'a trip to ' .. R.trip.zone .. ' is waiting to leave' end
     for _, b in ipairs(SICK) do if mq.TLO.Me.Buff(b)() then return 'I have ' .. b end end
     if hp() < S.restPct then return string.format('I am at %d%% HP', hp()) end
     local buffer = DPS.peerBuffing and DPS.peerBuffing()
@@ -2784,21 +2828,155 @@ local function pullHold(travel)
     return nil
 end
 
--- the hunt-zone trip waits for the same things (not for members who are elsewhere), for my own mana too, and never
--- leaves groupmates behind: Chase followers don't follow into another zone. Ramakrr respawned in the Guild Lobby with
--- the group, set off for Deepshade alone at 10% mana and died on the way (2026-10-19 22:36)
-local function travelHeld()
-    local hold = pullHold(true)
-    if not hold and (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < S.restPct then hold = string.format('I am at %d%% mana', mana()) end
-    if not hold then
-        for i = 1, (mq.TLO.Group.Members() or 0) do
-            local m = mq.TLO.Group.Member(i)
-            if m.Present() and not m.OtherZone() then hold = (m.Name() or '?') .. ' is here and would stay behind'; break end
-        end
+-- Travel (the Travel tab, /autoxp travel <zone>): EasyFind's /travelto, in any mode, AutoXP started or not. A trip
+-- leaves once nothing holds it back - no fight, the pull holds (not for members elsewhere), my own mana, my corpse in the
+-- Guild Lobby, a corpse here waiting for my rez - and on the way a running AutoXP only heals, mezzes and defends.
+-- Whole group: Travel and Stop go to the group too (DanNet). Return after death: alive again in another zone (a respawn
+-- at the bind point), back to the zone I died in, or the trip I was on. Ramakrr respawned in the Guild Lobby with the
+-- group, set off for Deepshade alone at 10% mana and died on the way (2026-10-19 22:36)
+do
+local LOBBY = 'guildlobby'
+
+local function toGroup(cmd)
+    if S.travelGroup and (mq.TLO.Group.Members() or 0) > 0 and mq.TLO.Plugin('mq2dannet').IsLoaded() then mq.cmdf('/dggexecute %s', cmd) end
+end
+
+local function myCorpses() return mq.TLO.SpawnCount('pccorpse ' .. ME .. "'s corpse")() or 0 end
+
+-- my corpse after a respawn in the Guild Lobby: wait for the summon (3 tries), then up to 3 minutes for a rez
+local function corpseHold()
+    local d = S.death
+    if not d.at or d.rezzed or not S.lobbySummon or d.zone == LOBBY or (mq.TLO.Zone.ShortName() or '') ~= LOBBY then return nil end
+    R.corpseBase = R.corpseBase or myCorpses()
+    if myCorpses() <= R.corpseBase then
+        if (R.summonTries or 0) < 3 then return 'my corpse is still in ' .. (d.zone or '?') end
+        return nil
     end
+    R.corpseHereAt = R.corpseHereAt or mq.gettime()
+    if mq.gettime() - R.corpseHereAt < 180000 then return 'my corpse is waiting for a rez' end
+end
+
+local function held()
+    local hold = (#hostiles() > 0 or R.state == 'FIGHT' or R.state == 'APPROACH' or R.pickId ~= 0) and 'a fight' or pullHold(true)
+    if not hold and (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < S.restPct then hold = string.format('I am at %d%% mana', mana()) end
+    hold = hold or corpseHold() or FIGHT.rezPending()
     if hold and hold ~= R.travelWhy then log('not traveling yet: %s', hold) end
     R.travelWhy = hold   -- its own field: sharing the pull hold's made both log every tick
     return hold ~= nil
+end
+
+-- back alive in the Guild Lobby within 3 hours of a death elsewhere: walk to the nearest Priestess of Luclin and say
+-- Summon (3 tries, 30s apart); the Rez duty (mine or a groupmate's) then resurrects the corpse
+function FIGHT.lobbySummon()
+    local d = S.death
+    if not S.lobbySummon or not d.at or d.rezzed or d.zone == LOBBY or (R.summonTries or 0) >= 3 then return false end
+    if (mq.TLO.Zone.ShortName() or '') ~= LOBBY or #hostiles() > 0 or casting() then return false end
+    R.corpseBase = R.corpseBase or myCorpses()
+    if myCorpses() > R.corpseBase or mq.gettime() - (R.summonAt or 0) < 30000 then return false end
+    local p = mq.TLO.NearestSpawn(1, 'npc Priestess of Luclin')
+    if not p() then R.summonTries = 3; log('no Priestess of Luclin here - my corpse stays in %s', d.zone or '?'); return false end
+    if (p.Distance3D() or 999) > 15 and mq.gettime() - (R.summonWalk or mq.gettime()) < 30000 then
+        if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+        if not mq.TLO.Navigation.Active() then mq.cmdf('/nav id %d distance=10', p.ID()) end
+        if not R.summonWalk then R.summonWalk = mq.gettime(); log('walking to %s to summon my corpse', p.CleanName() or '?') end
+        return true
+    end
+    mq.cmd('/nav stop')
+    targetId(p.ID())
+    mq.cmd('/say Summon')
+    R.summonAt, R.summonWalk, R.summonTries = mq.gettime(), nil, (R.summonTries or 0) + 1
+    log('asked %s to summon my corpse from %s (%d/3)', p.CleanName() or '?', d.zone or '?', R.summonTries)
+    return true
+end
+
+function TRIP.stop(reason)
+    local t = R.trip
+    if not t then return end
+    if t.going then mq.cmd('/travelto stop') end
+    R.trip, R.travelWhy = nil, nil
+    if R.state == 'TRAVEL' then setState(R.running and 'BUFF' or 'IDLE') end
+    log('travel to %s stopped%s', t.zone, reason and (': ' .. reason) or '')
+end
+
+-- solo: this character only (a trip sent by a groupmate)
+function TRIP.go(zone, solo, why)
+    zone = (zone or ''):lower()
+    if zone == '' then return end
+    if not solo then toGroup('/autoxp travel ' .. zone .. ' solo') end
+    S.travelZone = zone
+    if R.trip and R.trip.zone == zone then return end
+    TRIP.stop('new destination')
+    if (mq.TLO.Zone.ShortName() or '') == zone then log('already in %s', zone); return end
+    R.trip, R.travelWhy = { zone = zone, tries = 0 }, nil
+    local zi = zoneInfo(zone)
+    log('%s %s%s', why == 'return' and 'going back to' or 'travel to', zi and string.format('%s (%s)', zi.name, zone) or zone,
+        R.running and '' or ' (AutoXP stopped: travel only)')
+end
+
+function TRIP.cancel(solo)
+    if not solo then toGroup('/autoxp travel stop solo') end
+    TRIP.stop('user')
+end
+
+-- died: where (and the trip I was on) for the corpse summon and Return after death; the trip ends here
+function TRIP.died()
+    S.death = { at = os.time(), zone = mq.TLO.Zone.ShortName() or '', dest = R.trip and R.trip.zone or nil }
+    R.summonTries, R.summonAt, R.summonWalk, R.corpseBase, R.corpseHereAt = 0, 0, nil, nil, nil
+    TRIP.stop('died')
+end
+
+-- alive after a death: resurrection sickness means rezzed; back where I died (rezzed there) or at the trip's
+-- destination ends it; Return after death sets off once (3 hours at most: the rez window)
+function TRIP.afterDeath()
+    local d = S.death
+    if not d.at then return end
+    if os.time() - d.at > 10800 then S.death = {}; return end
+    if not d.rezzed then
+        for _, b in ipairs(SICK) do if mq.TLO.Me.Buff(b)() then d.rezzed = true; log('resurrected (%s)', b); break end end
+    end
+    local here, dest = mq.TLO.Zone.ShortName() or '', d.dest or d.zone
+    if here == '' then return end
+    if here == dest then S.death = {}; return end
+    if S.travelReturn and not d.returned and not R.trip then d.returned = true; TRIP.go(dest, false, 'return') end
+end
+
+-- true while the trip has the character (step() does nothing else but what comes before it)
+function TRIP.tick()
+    local t = R.trip
+    if not t then return false end
+    local here = mq.TLO.Zone.ShortName() or ''
+    if here == t.zone then
+        log('arrived in %s', t.zone); mq.cmd('/nav reload')
+        R.trip, R.travelWhy = nil, nil
+        if S.death.at and here == (S.death.dest or S.death.zone) then S.death = {} end
+        setState(R.running and 'BUFF' or 'IDLE')
+        return true
+    end
+    if mq.TLO.Me.State() == 'HOVER' or mq.TLO.Me.Dead() then return true end
+    if not t.going then
+        if held() then return false end
+        mq.cmd('/stick off'); mq.cmd('/nav stop'); attackOff(); R.targetId = 0
+        if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+        mq.cmdf('/travelto %s', t.zone)
+        t.going, t.tries, t.since, t.lastMoveAt, t.lastPos = true, 0, mq.gettime(), mq.gettime(), nil
+        log('traveling to %s (here: %s)', t.zone, here)
+        setState('TRAVEL')
+        return true
+    end
+    if R.state ~= 'TRAVEL' then setState('TRAVEL') end
+    -- progress / stall detection (moving or zoning counts as progress)
+    local pos = string.format('%s:%.0f:%.0f', here, mq.TLO.Me.Y() or 0, mq.TLO.Me.X() or 0)
+    if pos ~= t.lastPos then t.lastPos, t.lastMoveAt = pos, mq.gettime() end
+    if mq.gettime() - t.lastMoveAt > 30000 then
+        t.tries = t.tries + 1
+        if t.tries > 3 then TRIP.stop('stalled (EasyFind could not route?)'); if R.running then stopAll('travel stalled') end; return true end
+        log('travel stalled in %s - retrying /travelto %s (%d/3)', here, t.zone, t.tries)
+        mq.cmd('/travelto stop'); mq.cmdf('/travelto %s', t.zone)
+        t.lastMoveAt = mq.gettime()
+    end
+    if mq.gettime() - t.since > 30 * 60 * 1000 then TRIP.stop('timeout'); if R.running then stopAll('travel timeout') end end
+    return true
+end
 end
 
 -- Tank role: make myself the group's main tank and main assist (needs group leader), so Chase and
@@ -2888,6 +3066,16 @@ local function atTank(t)
     return mq.gettime() - R.assistSeenAt >= 6000
 end
 
+-- a follower of the group main assist (Chase / Assist with no leader named, not the tank) fights the main assist's
+-- target whenever that is on the extended target list: each follower's own priority pick could take another add than
+-- the tank's (Ramakrr on one leech while the other five killed another, 2026-10-20 17:38)
+function FIGHT.groupTarget()
+    if S.role == 'Tank' or (S.mode ~= 'Chase' and S.mode ~= 'Assist') or (S.mode == 'Assist' and S.assistName or S.chaseName) ~= '' then return nil end
+    local id = mq.TLO.Me.GroupAssistTarget.ID() or 0
+    if id == 0 then return nil end
+    for _, s in ipairs(hostiles()) do if s.ID() == id then return s end end
+end
+
 -- the mobs a walk to a pull passes: NPCs within the alone radius of the walking route (MQ2Nav's path points), on the
 -- same level (30 up or down), other than the pull itself and the ones next to it (its company, counted apart). Walking
 -- the group past them dragged them along to the pull. mobs = { {id, x, y, z, name} } read once per look; returns their
@@ -2921,7 +3109,9 @@ local function pickTarget()
     R.pendingDetour, R.pullCandidate = nil, false
     local best = bestTarget()
     if best then
-        if S.role == 'Tank' or (S.mode ~= 'Chase' and S.mode ~= 'Assist') or atTank(best) then return best.ID() end
+        if S.role == 'Tank' or (S.mode ~= 'Chase' and S.mode ~= 'Assist') then return best.ID() end
+        best = FIGHT.groupTarget() or best
+        if atTank(best) then return best.ID() end
         return nil
     end
     if S.mode == 'Manual' then
@@ -3141,7 +3331,7 @@ local function fightTick()
         return
     end
     if not alive(t) then
-        local nextT = bestTarget()
+        local nextT = FIGHT.groupTarget() or bestTarget()
         R.kills = R.kills + 1
         log('killed %s in %.1fs (kills %d)', R.targetName, inState() / 1000, R.kills)
         DPS.kill(inState() / 1000)
@@ -3155,6 +3345,17 @@ local function fightTick()
         return
     end
     if doRez() then return end
+    -- the tank moved on to another add: go with it (looked at every 2s; a mezzed one is left mezzed)
+    local gt = mq.gettime() - (R.groupSwitchAt or 0) > 2000 and FIGHT.groupTarget()
+    if gt then
+        R.groupSwitchAt = mq.gettime()
+        if gt.ID() ~= R.targetId and not mezzed(gt) then
+            R.targetId, R.targetName, R.opened, R.holdUntil = gt.ID(), gt.CleanName(), false, 0
+            log("switch target -> %s (the tank's target)", R.targetName)
+            attackOn(); closeIn(gt)
+            return
+        end
+    end
     if (mq.TLO.Target.ID() or 0) ~= R.targetId or not R.attacking then restoreFight() end
     if hp() < 12 and S.mode == 'Hunter' and (mq.TLO.Group.Members() or 0) == 0 then stopAll('HP critical'); return end
     if FIGHT.tankBuffs() then return end
@@ -3212,10 +3413,11 @@ end
 local function step()
     -- dead: drop the fight and wait for a rez (or a respawn), then start over from BUFF
     if mq.TLO.Me.State() == 'HOVER' or mq.TLO.Me.Dead() then
-        if not R.dead then R.dead = true; R.targetId, R.pickId, R.cast = 0, 0, nil; setState('BUFF'); log('died - waiting for a rez') end
+        if not R.dead then R.dead = true; R.targetId, R.pickId, R.cast = 0, 0, nil; TRIP.died(); setState('BUFF'); log('died - waiting for a rez') end
         return
     end
     if R.dead then R.dead = false; log('alive again') end
+    TRIP.afterDeath()
     noticePick()
     if watchCast() then return end
     claimGroupRoles()
@@ -3231,42 +3433,12 @@ local function step()
     if doDefense() then return end
     local st = R.state
     if followPick(st) then return end
-    local here = mq.TLO.Zone.ShortName() or ''
+    -- a trip (Travel tab): once it leaves, nothing else but the heals, mez and defense above until it arrives
+    if TRIP.tick() then return end
 
-    -- hunt zone changed while running: leave once we're not fighting
-    if S.mode == 'Hunter' and S.travel and here ~= S.zone and st ~= 'TRAVEL' and st ~= 'FIGHT' and R.pickId == 0 and #hostiles() == 0
-        and not travelHeld() then
-        mq.cmd('/stick off'); mq.cmd('/nav stop'); attackOff(); R.targetId = 0
-        mq.cmdf('/travelto %s', S.zone)
-        R.travelTarget, R.travelTries, R.lastMoveAt = S.zone, 0, mq.gettime()
-        log('hunt zone is %s (here: %s) - traveling', S.zone, here)
-        setState('TRAVEL')
-        return
-    end
-
-    if st == 'TRAVEL' then
-        if here == S.zone then log('arrived in %s', S.zone); mq.cmd('/nav reload'); setState('BUFF'); return end
-        if travelHeld() then mq.cmd('/travelto stop'); setState('BUFF'); return end
-        if R.travelTarget ~= S.zone then
-            log('travel destination changed -> %s', S.zone)
-            mq.cmd('/travelto stop'); mq.cmdf('/travelto %s', S.zone)
-            R.travelTarget, R.travelTries, R.lastMoveAt = S.zone, 0, mq.gettime()
-            return
-        end
-        -- progress / stall detection (moving or zoning counts as progress)
-        local pos = string.format('%s:%.0f:%.0f', here, mq.TLO.Me.Y() or 0, mq.TLO.Me.X() or 0)
-        if pos ~= R.lastPos then R.lastPos, R.lastMoveAt = pos, mq.gettime() end
-        if mq.gettime() - R.lastMoveAt > 30000 then
-            R.travelTries = R.travelTries + 1
-            if R.travelTries > 3 then stopAll('travel stalled (EasyFind could not route?)'); return end
-            log('travel stalled in %s - retrying /travelto %s (%d/3)', here, S.zone, R.travelTries)
-            mq.cmd('/travelto stop'); mq.cmdf('/travelto %s', S.zone)
-            R.lastMoveAt = mq.gettime()
-        end
-        if inState() > 30 * 60 * 1000 then stopAll('travel timeout') end
-
-    elseif st == 'BUFF' then
+    if st == 'BUFF' then
         if #hostiles() > 0 then setState('FIND'); return end
+        if FIGHT.lobbySummon() then return end
         chaseFollow()
         -- (not while a bard's song plays: the spell book would cut it off)
         if not R.swapGem and quiet() and not casting() then
@@ -3292,6 +3464,7 @@ local function step()
     elseif st == 'REST' then
         if #hostiles() > 0 then mq.cmd('/stand'); setState('FIND'); return end
         if doRez() then return end
+        if FIGHT.lobbySummon() then return end
         if FIGHT.chaseLoot() then return end
         if S.mode == 'Chase' then
             local lead = leadSpawn()
@@ -3305,6 +3478,7 @@ local function step()
 
     elseif st == 'FIND' then
         if doRez() then return end
+        if FIGHT.lobbySummon() then return end
         if doEndurance() then return end
         if petsToArm() then setState('BUFF'); return end
         -- group buffs come before the next pull: idle with nothing around, go buff (a member every 30s at most)
@@ -3446,9 +3620,9 @@ local function setPaused(p)
     R.paused = p
     if p then
         attackOff(); mq.cmd('/nav stop'); mq.cmd('/stick off')
-        if R.state == 'TRAVEL' then mq.cmd('/travelto stop') end
-    elseif R.state == 'TRAVEL' then
-        mq.cmdf('/travelto %s', S.zone); R.travelTarget, R.lastMoveAt = S.zone, mq.gettime()
+        if R.trip and R.trip.going then mq.cmd('/travelto stop') end
+    elseif R.trip and R.trip.going then
+        mq.cmdf('/travelto %s', R.trip.zone); R.trip.lastMoveAt = mq.gettime()
     end
     log(p and 'paused' or 'resumed')
 end
@@ -3559,6 +3733,13 @@ local function toggle(label, key, help)
     if ImGui.Button(label, 70, 26) then S[key] = not S[key]; log('%s %s', label, S[key] and 'ON' or 'OFF') end
     ImGui.PopStyleColor()
     if help then tip(help) end
+end
+
+-- in place of SameLine() before an item w wide: it stays on the row while it fits, else starts the next line, so rows
+-- of buttons re-flow when the window is resized
+local function flow(w)
+    ImGui.SameLine()
+    if ImGui.GetContentRegionAvail() < w then ImGui.NewLine() end
 end
 
 local ROLEHELP = {
@@ -3948,24 +4129,24 @@ function draw()
 
         ImGui.SetNextItemWidth(110)
         local m = combo('Mode', S.mode, MODES)
-        if m ~= S.mode then S.mode = m; log('mode %s', m); if m == 'Hunter' then huntHere() end end
+        if m ~= S.mode then S.mode = m; log('mode %s', m) end
         updateMapRadius()
-        ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); ImGui.SameLine(); roleButton('DPS')
-        ImGui.SameLine()
+        ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); flow(70); roleButton('DPS')
+        flow(70)
         toggle('Backup', 'backupTank', 'Backup tank: while the group main tank is dead or out of the zone, tank in its place\n(Tank role: taunt, Tank abilities, mobs in front, target priority); back to DPS once it is alive\nand nothing is on the extended target list.')
         ImGui.Text('Duties:'); ImGui.SameLine()
         toggle('Heal', 'heal', 'Heal: heal yourself / group members below the Healing thresholds,\nand use Emergency abilities (Lay on Hands) below the emergency threshold.')
-        ImGui.SameLine()
+        flow(70)
         toggle('CC', 'cc', 'CC: mez adds (Mez list), interrupt a casting target and stun adds\nthat are not your current target (CC stuns list). Mezzed adds are left for last.')
-        ImGui.SameLine()
+        flow(70)
         toggle('Debuff', 'debuff', 'Debuff: slow, malo/tash and cripple the target once each (Debuffs list).\nThe best of each line in your spell book is kept memorized.')
-        ImGui.SameLine()
+        flow(70)
         toggle('Nuke', 'nuke', 'Nuke: cast nukes at the target in a fight (Nukes list: damage stuns and swarm pets too).\nThe best nuke and undead nuke in your spell book are kept memorized.')
-        ImGui.SameLine()
+        flow(70)
         toggle('DoT', 'dot', 'DoT: put each damage-over-time spell on the target once (DoTs list) while it is above 40%.')
-        ImGui.SameLine()
+        flow(70)
         toggle('Rez', 'rez', 'Rez: in a fight, Call of the Wild on a dead group member (no exp, they can still get an exp rez).\nOut of combat, an exp rez AA (Blessing of Resurrection, Rejuvenation of Spirit) or your best rez spell, once per corpse.')
-        ImGui.SameLine()
+        flow(70)
         toggle('Buff', 'buff', 'Buff: keep group members buffed too. HP, AC, resist and Unity buffs go to everyone,\nhaste, attack and strength to melee, mana regen to classes that use mana.')
         ImGui.Separator()
 
@@ -3986,11 +4167,12 @@ function draw()
         if ImGui.SmallButton(S.showHud and 'Hide HUD##hud' or 'Show HUD##hud') then S.showHud = not S.showHud end
         tip('AutoXP HUD: my DPS (now, this fight, last fight, session), damage breakdown, kills and XP / AA per hour.\nRight-click it to reset the stats.')
         if R.peers then
-            ImGui.SameLine()
+            flow(ImGui.CalcTextSize('Hide group') + 8)
             if ImGui.SmallButton(S.showPeers and 'Hide group##grp' or 'Show group##grp') then S.showPeers = not S.showPeers end
             tip('AutoXP Group window: HP, mana, endurance, DPS, AutoXP state, target and status of every DanNet peer.')
-            ImGui.SameLine()
-            ImGui.TextColored(0.5, 0.8, 1, 1, string.format('DanNet (%d): %s', #R.peers, table.concat(R.peers, ' ')))
+            local peers = string.format('DanNet (%d): %s', #R.peers, table.concat(R.peers, ' '))
+            flow(math.min(ImGui.CalcTextSize(peers), 200))
+            ImGui.PushTextWrapPos(0); ImGui.TextColored(0.5, 0.8, 1, 1, peers); ImGui.PopTextWrapPos()
         end
         bar(hp() / 100, string.format('HP %d%%', hp()))
         bar(mana() / 100, string.format('Mana %d%%', mana()))
@@ -4029,41 +4211,6 @@ function draw()
         R.inChild = true
         if ImGui.BeginTabBar('tabs') then
             if ImGui.BeginTabItem('General') then
-                local zi = zoneInfo(S.zone)
-                ImGui.Text('Hunt zone:'); ImGui.SameLine()
-                ImGui.TextColored(0.4, 0.8, 1, 1, zi and string.format('%s (%s)', zi.name, zi.short) or S.zone)
-                if zi then ImGui.SameLine(); ImGui.TextColored(0.6, 0.6, 0.6, 1, '- ' .. zi.exp) end
-                if ImGui.Button('Use current zone') then S.zone = mq.TLO.Zone.ShortName() or S.zone; log('hunt zone %s', S.zone) end
-                ImGui.SameLine()
-                ImGui.SameLine()
-                ImGui.SetNextItemWidth(220)
-                if ImGui.BeginCombo('##zonepick', 'Browse by expansion...', ImGuiComboFlags.HeightLarge) then
-                    local lastExp
-                    for _, z in ipairs(ZONES) do
-                        if z.exp ~= lastExp then ImGui.TextColored(1, 0.8, 0.3, 1, z.exp); lastExp = z.exp end
-                        local a, b = ImGui.Selectable(string.format('   %s  (%s)##z%d', z.name, z.short, z.id), S.zone == z.short)
-                        local clicked = b; if clicked == nil then clicked = a end
-                        if clicked and S.zone ~= z.short then S.zone = z.short; log('hunt zone %s (%s)', z.name, z.short) end
-                    end
-                    ImGui.EndCombo()
-                end
-                ImGui.SetNextItemWidth(260)
-                R.zoneFilter = ImGui.InputText('Search zones', R.zoneFilter or '')
-                local f = (R.zoneFilter or ''):lower()
-                if #f >= 2 then
-                    local shown = 0
-                    for _, z in ipairs(ZONES) do
-                        if z.name:lower():find(f, 1, true) or z.short:find(f, 1, true) then
-                            shown = shown + 1
-                            if shown > 15 then ImGui.TextColored(0.6, 0.6, 0.6, 1, '   ...more, keep typing'); break end
-                            local a, b = ImGui.Selectable(string.format('   %s  (%s)  - %s##s%d', z.name, z.short, z.exp, z.id), S.zone == z.short)
-                            local clicked = b; if clicked == nil then clicked = a end
-                            if clicked then S.zone = z.short; R.zoneFilter = ''; log('hunt zone %s (%s)', z.name, z.short) end
-                        end
-                    end
-                    if shown == 0 then ImGui.TextColored(1, 0.5, 0.5, 1, '   no matching zones') end
-                end
-                S.travel = ImGui.Checkbox('Travel there first (EasyFind)', S.travel)
                 S.minlvl = ImGui.SliderInt('Min level', S.minlvl, 1, 130)
                 S.maxlvl = ImGui.SliderInt('Max level', S.maxlvl, S.minlvl, 130)
                 S.radius = ImGui.SliderInt('Pull radius', S.radius, 100, 5000)
@@ -4145,10 +4292,11 @@ function draw()
                 if ImGui.Button('Scan class abilities') then R.wantScan = true end
                 tip('Reads skills, disciplines and class AAs and sorts them by what their spells do.\nRoles you pick yourself are kept on a rescan; older ranks of a line are set Off.')
                 ImGui.SameLine(); ImGui.Text(string.format('%d found', #S.abilities))
-                ImGui.SameLine()
+                flow(ImGui.CalcTextSize('Burn now (60s)') + 8)
                 if ImGui.Button('Burn now (60s)') then R.burnUntil = mq.gettime() + 60000; log('burn: manual, 60s') end
-                S.burnNamed = ImGui.Checkbox('Burn on named', S.burnNamed); ImGui.SameLine()
-                S.burnLevel = ImGui.Checkbox('Burn at/above my level', S.burnLevel); ImGui.SameLine()
+                local box = ImGui.GetFrameHeight() + 4   -- a checkbox's square and the gap before its label
+                S.burnNamed = ImGui.Checkbox('Burn on named', S.burnNamed); flow(box + ImGui.CalcTextSize('Burn at/above my level'))
+                S.burnLevel = ImGui.Checkbox('Burn at/above my level', S.burnLevel); flow(box + ImGui.CalcTextSize('Burn on mobs:') + 118)
                 S.burnAdds = ImGui.Checkbox('Burn on mobs:', S.burnAdds); ImGui.SameLine(); ImGui.SetNextItemWidth(110)
                 S.burnCount = ImGui.SliderInt('##burnCount', S.burnCount, 2, 10)
                 tip('Burn once this many mobs are on the extended target list.')
@@ -4204,6 +4352,67 @@ function draw()
                 S.emergencyPct = ImGui.SliderInt('Emergency abilities below %', S.emergencyPct, 5, 60)
                 ImGui.EndTabItem()
             end
+            if ImGui.BeginTabItem('Travel') then
+                local zi = zoneInfo(S.travelZone)
+                ImGui.Text('Destination:'); ImGui.SameLine()
+                ImGui.TextColored(0.4, 0.8, 1, 1, zi and string.format('%s (%s)', zi.name, zi.short) or (S.travelZone ~= '' and S.travelZone or 'none'))
+                if zi then ImGui.SameLine(); ImGui.TextColored(0.6, 0.6, 0.6, 1, '- ' .. zi.exp) end
+                if R.trip then
+                    if ImGui.Button('Stop travel', 100, 26) then TRIP.cancel() end
+                elseif ImGui.Button('Travel', 100, 26) and S.travelZone ~= '' then
+                    TRIP.go(S.travelZone)
+                end
+                tip('EasyFind /travelto the destination, in any mode, AutoXP started or not (/autoxp travel <zone>, /autoxp travel stop).\nIt leaves once nothing holds it back: no fight, HP and mana above "Rest below %", no resurrection sickness,\nnobody in the group dead or low. On the way it only heals, mezzes and defends.')
+                flow(200)
+                local tr = R.trip
+                ImGui.PushTextWrapPos(0)
+                if tr and tr.going then
+                    ImGui.TextColored(0.4, 0.7, 1, 1, string.format('traveling to %s%s', tr.zone, tr.tries > 0 and string.format(' (retry %d/3)', tr.tries) or ''))
+                elseif tr then
+                    ImGui.TextColored(1, 0.8, 0.3, 1, string.format('waiting to leave for %s: %s', tr.zone, R.travelWhy or '...'))
+                else
+                    ImGui.TextDisabled('not traveling')
+                end
+                ImGui.PopTextWrapPos()
+                S.travelGroup = ImGui.Checkbox('Whole group', S.travelGroup)
+                tip('Travel and Stop go to every group member too (DanNet). Each travels by EasyFind once its own holds clear,\nand the Hunter pulls only once everyone is in the zone.')
+                S.travelReturn = ImGui.Checkbox('Return after death', S.travelReturn)
+                tip('Alive again in another zone after a death (a respawn at the bind point): travel back to the zone I died in,\nor on to the trip I was on - with the whole group when that is on. Nothing changes after a rez where I died.')
+                S.lobbySummon = ImGui.Checkbox('Summon my corpse in the Guild Lobby', S.lobbySummon)
+                tip('Alive again in the Guild Lobby after a death elsewhere: walk to the nearest Priestess of Luclin and say Summon,\nthen wait up to 3 minutes for a rez (Rez duty, mine or a groupmate\'s) before a trip leaves.')
+                if S.death.at then
+                    ImGui.TextDisabled(string.format('Died in %s at %s%s', S.death.zone or '?', os.date('%H:%M', S.death.at), S.death.rezzed and ' - resurrected' or ''))
+                end
+                ImGui.Separator()
+                ImGui.SetNextItemWidth(220)
+                if ImGui.BeginCombo('##zonepick', 'Browse by expansion...', ImGuiComboFlags.HeightLarge) then
+                    local lastExp
+                    for _, z in ipairs(ZONES) do
+                        if z.exp ~= lastExp then ImGui.TextColored(1, 0.8, 0.3, 1, z.exp); lastExp = z.exp end
+                        local a, b = ImGui.Selectable(string.format('   %s  (%s)##z%d', z.name, z.short, z.id), S.travelZone == z.short)
+                        local clicked = b; if clicked == nil then clicked = a end
+                        if clicked and S.travelZone ~= z.short then S.travelZone = z.short; log('travel destination %s (%s)', z.name, z.short) end
+                    end
+                    ImGui.EndCombo()
+                end
+                ImGui.SetNextItemWidth(260)
+                R.zoneFilter = ImGui.InputText('Search zones', R.zoneFilter or '')
+                local f = (R.zoneFilter or ''):lower()
+                if #f >= 2 then
+                    local shown = 0
+                    for _, z in ipairs(ZONES) do
+                        if z.name:lower():find(f, 1, true) or z.short:find(f, 1, true) then
+                            shown = shown + 1
+                            if shown > 15 then ImGui.TextColored(0.6, 0.6, 0.6, 1, '   ...more, keep typing'); break end
+                            local a, b = ImGui.Selectable(string.format('   %s  (%s)  - %s##s%d', z.name, z.short, z.exp, z.id), S.travelZone == z.short)
+                            local clicked = b; if clicked == nil then clicked = a end
+                            if clicked then S.travelZone = z.short; R.zoneFilter = ''; log('travel destination %s (%s)', z.name, z.short) end
+                        end
+                    end
+                    if shown == 0 then ImGui.TextColored(1, 0.5, 0.5, 1, '   no matching zones') end
+                end
+                ImGui.EndTabItem()
+            end
             if ImGui.BeginTabItem('Log') then
                 -- newest on top
                 for i = #R.log, math.max(1, #R.log - 30), -1 do ImGui.TextWrapped(R.log[i]) end
@@ -4240,13 +4449,14 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif cmd == 'mode' and a1 then
         for _, m in ipairs(MODES) do
             if m:lower() == a1:lower() then
-                local was = S.mode
                 S.mode = m; log('mode %s', m)
-                if m == 'Hunter' and was ~= 'Hunter' then huntHere() end
             end
         end
     elseif cmd == 'role' and a1 and (a1:lower() == 'tank' or a1:lower() == 'dps') then S.role = a1:lower() == 'tank' and 'Tank' or 'DPS'; log('role %s', S.role)
     elseif cmd == 'tank' then S.role = 'Tank'; log('role Tank') elseif cmd == 'dps' then S.role = 'DPS'; log('role DPS')
+    elseif cmd == 'travel' then
+        -- /autoxp travel <zone> | stop (solo: this character only, never passed on to the group)
+        if a1 == 'stop' then TRIP.cancel(a2 == 'solo') else TRIP.go(a1 or S.travelZone, a2 == 'solo') end
     elseif cmd == 'group' then S.showPeers = not S.showPeers
     elseif cmd == 'hud' then S.showHud = not S.showHud
     elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
@@ -4259,9 +4469,10 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|group|hud [on|off]|set <setting> <value>|spells|burn')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>')
 
 startSpellScan()
+if args[1] then TRIP.go(args[1]) end
 while not R.terminate do
     if not SP.scanning and SP.done and (mq.TLO.Me.Level() or 0) ~= SP.level then pcall(startSpellScan) end
     local sok, serr = pcall(stepSpellScan)
@@ -4279,6 +4490,11 @@ while not R.terminate do
     if mq.gettime() - (R.savedAt or 0) > 15000 then R.savedAt = mq.gettime(); pcall(save) end
     local pok, perr = pcall(peersTick)
     if not pok and perr ~= R.peerErr then R.peerErr = perr; log('group view error: %s', tostring(perr)) end
+    -- a trip with AutoXP stopped (Travel tab, /autoxp travel); a running AutoXP travels from step()
+    if R.trip and not R.running then
+        local tok, terr = pcall(TRIP.tick)
+        if not tok then log('travel error: %s', tostring(terr)); TRIP.stop('error') end
+    end
     if R.running and not R.paused then
         pcall(stowCursor)
         local ok, err = pcall(step)

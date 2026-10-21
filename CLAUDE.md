@@ -14,7 +14,7 @@ MacroQuest Lua leveling automation (`init.lua`, `zones.lua`). Private repo nicce
 3. Check nothing is used before its `local` / `local function` definition (a forward reference silently becomes a
    nil global — e.g. a table declared below the function that uses it).
 4. Reload only between fights (`${Me.XTarget}` == 0): `/autoxp save` FIRST (`/lua stop` kills the script without
-   saving, so unsaved UI changes like the hunt zone are lost), then `/lua stop autoxp`, `/lua run autoxp`, `/autoxp start`.
+   saving, so unsaved UI changes like the travel destination are lost), then `/lua stop autoxp`, `/lua run autoxp`, `/autoxp start`.
    In Tank role + Manual mode, whatever is targeted at start counts as the player's pick.
 5. Watch the log for the change, then commit/push only when asked (ncellular, no attribution).
 
