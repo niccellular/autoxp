@@ -9,7 +9,7 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 ```
 /lua run autoxp [zone]          (travels to the zone)
 /autoxp start|stop|pause|resume|show|scan|spells|save
-/autoxp mode <Manual|Hunter|Assist|Chase>
+/autoxp mode <Manual|Hunter|Named|Assist|Chase>
 /autoxp role <tank|dps>
 /autoxp heal|cc|debuff|nuke|dot|buff|rez [on|off]
 /autoxp group          (show / hide the AutoXP Group window)
@@ -18,6 +18,8 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
 /autoxp travel [zone]            (travel there, the whole group with "Whole group" on)
 /autoxp travel stop
+/autoxp named reload|scrape         (Named mode's zone data: load again / read eqresource.com again)
+/autoxp invis [ivu]              (cast my invis AAs - what the Named leader asks of the group)
 ```
 
 Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goes to `<MQ>/lua/autoxp_log_<Name>.txt`.
@@ -25,10 +27,12 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 ## Requires
 
 - MQ2Nav with meshes for the zones you hunt, MQ2MoveUtils, MQ2EasyFind (travel).
+- Named mode in a zone without `named/<zone>.lua`: Python 3 (`pythonw` on the PATH) to read it from eqresource.com.
 
 ## What it does
 
-- **Modes:** Hunter (finds mobs in a level range and radius, in the zone it is in), Assist, Chase, Manual.
+- **Modes:** Hunter (finds mobs in a level range and radius, in the zone it is in), Named (only the zone's named and
+  their placeholders), Assist, Chase, Manual.
 - **Role:** Tank (front, taunt, stun-lock, target priority, keeps mobs in front) or DPS (behind or at range).
   Duties are separate toggles: Heal, CC, Debuff, Nuke, DoT, Buff, Rez (e.g. a healer can opt out of nukes or DoTs).
   **Backup** (backup tank): while the group main tank is dead or out of the zone, this character tanks in its place
@@ -38,12 +42,19 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   extended target list (first pick, next add, and when it switches mid-fight), not their own priority pick.
 - **Class setup:** scans skills, disciplines and class AAs; fills spell lists from memorized gems (heals, stuns and hate
   spells, nukes and lifetaps, DoTs, slows, mez, mana spells, pet, buffs); casters and priests fight from range.
+  A ranger with a bow holds 40 off its target and backs away when it comes closer, unless backing up would take it
+  toward another NPC within the alone radius (one not already fighting the group): then it walks around the mob (30
+  degrees at a time either way) to the nearest side where backing up is clear, and backs away there; with no such side
+  it holds its spot, and melees the mob while it is too close to shoot. A melee DPS that casts (not the tank, not a bard) gets up to 4s to walk
+  behind its target before a debuff, nuke, DoT, burn or DPS ability stops it for a cast (each cast stops the stick);
+  heals, mezzes and defense go out at once.
   A list you edit (Spells / Healing tabs, or the settings file's `userLists`) stays as you wrote it when the gems
   change; "Fill from memorized gems" refills them all.
 - **Travel** (Travel tab, `/autoxp travel <zone>`): EasyFind to a zone, in any mode, AutoXP started or not. A trip
   leaves once nothing holds it back: no fight, HP and mana above "Rest below %", no resurrection sickness, nobody in
-  the group dead or low, no corpse here waiting for a rez. On the way it only heals, mezzes and defends; the Hunter
-  doesn't pull while a trip waits. **Whole group** sends Travel and Stop to every group member (DanNet `/dggexecute`);
+  the group dead or low, no corpse here waiting for a rez. On the way it heals, mezzes and defends; a mob on the
+  extended target list within 150 of it or of the main tank stops the trip to fight it, and it sets off again once
+  nothing holds it back. The Hunter doesn't pull while a trip waits. **Whole group** sends Travel and Stop to every group member (DanNet `/dggexecute`);
   each leaves once its own holds clear, and the Hunter pulls only once everyone is in the zone. **Return after death**
   (off by default): alive again in another zone after a death (a respawn at the bind point), travel back to the zone
   it died in, or on to the trip it was on.
@@ -51,7 +62,9 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   to the nearest Priestess of Luclin and says Summon (3 tries), then waits up to 3 minutes for a rez before a trip
   leaves. A character with the Rez duty holds its own trip until the group's corpses there are resurrected (5 minutes
   each at most).
-- **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes.
+- **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes. The tank
+  never pulls alone: no pull while a group member here is over 200 away (the hold says when the group main tank is
+  someone else - Chase follows the main tank), and near the target it waits up to 60s for the group to catch up.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
   walking distance, but only one whose walking route passes no other mob within the alone radius (grey ones and Find
   Window NPCs aside): a route past other mobs drags them along. With no clear route it waits and looks again (the log
@@ -59,6 +72,18 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   ENC, BRD, MAG, WIZ, NEC) is under it in mana (a bard: under 20%), a groupmate is casting its buffs (up to 60s each; a bard's songs
   don't count) or a groupmate is walking to or resurrecting a corpse (up to 3 minutes each).
   NPCs listed in the zone's Find Window (quest givers, merchants, bankers) are never hunted.
+- **Named mode** (Named tab): the tank hunts only the zone's named mobs and their placeholders; the group follows in
+  Chase. The zone's named, placeholders, the map points players posted in the page comments and every named drop
+  (tradeable, or the classes that can use a No Trade one) come from eqresource.com's Named pages, kept in
+  `named/<zone>.lua` (the seven Laurion's Song zones are included; another zone is read in the background by
+  `tools/named_scrape.py` the first time). Targets are the live spawns with those names - the client sees the whole
+  zone; a placeholder of a named with posted map points counts only near one, and one under 100% HP that isn't on
+  the extended target list is left to whoever is fighting it. A named up goes first, then the placeholders clockwise
+  around the zone (north at 12) from where the tank stands. Before a walk past other NPCs the group goes invisible:
+  invisibility versus undead first when undead are along the way (Group Perfected Invisibility to Undead, cast by
+  whoever has it), then the bard's Selo's Sonata and Shauri's Sonorous Clouding (AAs 3704, 231; "Invis with" /
+  "IVU with" set others); after three asks it goes anyway. It holds for the same reasons as the Hunter, pulls with the
+  pull spell, fights what comes, and the chase looter hands out the drops.
 - **Movement:** 3D distance and line of sight; navigates on the mesh instead of sticking through walls or floors.
   It goes to a mob like `/nav target` (the whole path, re-pathed as the mob moves) and stops itself once the mob is
   in range, in sight and on its floor.
@@ -114,16 +139,19 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   (with a full hand nothing can be memorized); never while a trade, give, merchant or bank window is open.
 - **Rez duty:** in a fight only Call of the Wild (no exp, on someone still dead), 10s after they died and only while
   the main tank and main assist are alive (heals come first); out of combat an exp rez AA or
-  the best rez spell, once per corpse (remembered for 3 hours across reloads). Out of combat it walks on the mesh to
-  any group member's corpse in the zone (and its own), giving up on one after 90s; the Hunter tank holds its pulls
-  meanwhile.
+  the best rez spell, once per corpse (remembered for 3 hours across reloads), standing still for the cast; a group
+  member still dead 45s after a rez (interrupted, or the offer lost) is rezzed again. Out of combat a corpse out of reach
+  (a group member's, or its own) is dragged over with `/corpse` (a groupmate's needs their consent) - never walked to;
+  one that doesn't come (out of range) is looked at again every minute, and let go (`/corpsedrop`) once rezzed. The
+  Hunter tank holds its pulls meanwhile.
 - **Chase loot:** out of fights, every 3s, from the Advanced Loot window: each character loots its own personal
   chase drops and the group leader hands out the shared ones ("Chase loot", on by default): tradeable ones to himself,
   No Trade ones to a group member of a class that can use them (the classes are listed with the item; the member given
   fewest of that item so far, skipping one who didn't take it). What counts is in
   `chaseloot.lua` (name patterns, exact item names, never-loot): Night of Shadows' "Blood-soaked ..." items and
   Deepshade's named gear, Laurion's Song's "... of Memoryforged Desolation" items, the tradeable named gear of Laurion
-  Inn, Timorous Falls and Ankexfen Keep, the No Trade named gear of the LS tier 2 zones, and LS named power sources. Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
+  Inn, Timorous Falls and Ankexfen Keep, the No Trade named gear of the LS tier 2 zones, and LS named power sources;
+  in a zone with a `named/<zone>.lua`, every drop of its named (Named mode's data, any mode). Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under

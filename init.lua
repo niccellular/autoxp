@@ -1,7 +1,8 @@
 -- autoxp: group automation with ImGui front end.
--- Modes: Hunter (find+pull), Assist (MA's target), Chase (follow a toon), Manual (act on own target).
+-- Modes: Hunter (find+pull), Named (a zone's named and placeholders: named.lua), Assist (MA's target), Chase (follow a toon),
+-- Manual (act on own target).
 -- Role: Tank or DPS; duties: Heal, CC. Abilities, spell lists and melee/ranged style follow the character's class.
--- /lua run autoxp [zone] (travels there)   then /autoxp start|stop|pause|resume|show|scan|spells|mode <m>|role <tank|dps>|heal|cc [on|off]|travel <zone|stop>
+-- /lua run autoxp [zone] (travels there)   then /autoxp start|stop|pause|resume|show|scan|spells|mode <m>|role <tank|dps>|heal|cc [on|off]|travel <zone|stop>|invis [ivu]|named reload|scrape
 local mq = require('mq')
 local ImGui = require('ImGui')
 
@@ -18,7 +19,7 @@ end
 -- the character's name; a dead character's spawn is "<Name>'s corpse", which must not pick another settings file
 local ME = ((mq.TLO.Me.CleanName() or 'default'):gsub("'s corpse%d*$", ''))
 local CONFIG = string.format('%s/autoxp_%s.lua', mq.configDir, ME)
-local MODES = { 'Manual', 'Hunter', 'Assist', 'Chase' }
+local MODES = { 'Manual', 'Hunter', 'Named', 'Assist', 'Chase' }
 local ROLES = { 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pet', 'Pull' }
 local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Emergency', 'CC', 'Debuff', 'Buff', 'Endurance', 'Mana', 'Pet', 'Pull' }
 
@@ -26,6 +27,7 @@ local SHOWROLES = { 'All', 'Off', 'Tank', 'DPS', 'Burn', 'Defense', 'Heal', 'Eme
 local S = {
     mode = 'Hunter', role = 'Tank', heal = true, cc = false, debuff = true, nuke = true, dot = true, buff = true, rez = false, ccStuns = '',
     travelZone = '', travelGroup = true, travelReturn = false, lobbySummon = true, death = {},
+    namedInvis = true, invisWith = '', ivuWith = '',
     minlvl = 15, maxlvl = 25, radius = 1500,
     assistName = '', assistAt = 95, chaseName = '', chaseDist = 30,
     restPct = 50, restTo = 90,
@@ -193,15 +195,16 @@ end
 local function attackOn()
     if R.targetId > 0 and targetId(R.targetId) then
         local t = spawn(R.targetId)
-        if ranged() or not (t and (t.Distance3D() or 999) < 40) then mq.cmdf('/face fast id %d', R.targetId) else mq.cmd('/attack on') end
-        if archer() and not mq.TLO.Me.AutoFire() then mq.cmd('/autofire') end
+        local melee = R.archMelee == R.targetId   -- an archer meleeing what it can't back away from
+        if (ranged() and not melee) or not (t and (t.Distance3D() or 999) < 40) then mq.cmdf('/face fast id %d', R.targetId) else mq.cmd('/attack on') end
+        if archer() and not melee and not mq.TLO.Me.AutoFire() then mq.cmd('/autofire') end
         R.attacking = true
     end
 end
 local function attackOff()
     mq.cmd('/attack off')
     if mq.TLO.Me.AutoFire() then mq.cmd('/autofire') end
-    R.attacking = false
+    R.attacking, R.archMelee = false, nil
 end
 
 -- the swarm pets (Ravening Servant, Chattering Bones, Spirit Call) go with it: /pet swarm with the attack, and again 5s
@@ -257,16 +260,19 @@ local function castFailed(spell, how)
     while #f > 0 and now - f[1] > 30000 do table.remove(f, 1) end
     castFails[spell] = f
     R.songNext[spell] = nil   -- an interrupted song didn't start its recast
-    if R.cast and R.cast.id then
-        R.rezzed[R.cast.id] = nil
-        if R.cast.rezKey then S.rezDone[R.cast.rezKey] = nil end
-        if R.cast.kind == 'cc' then R.mezzed[R.cast.id] = nil end
+    -- the cast bar can clear (watchCast lets the cast go) before its interrupt is read: the cast that just ended counts.
+    -- Lolelena's interrupted rez on Zenban stayed marked done that way (2026-10-21 15:28)
+    local c = R.cast or (R.lastCast and R.lastCast.name == spell and mq.gettime() - R.lastCast.endedAt < 3000 and R.lastCast) or nil
+    if c and c.id then
+        R.rezzed[c.id] = nil
+        if c.rezKey then S.rezDone[c.rezKey] = nil end
+        if c.kind == 'cc' then R.mezzed[c.id] = nil end
     end
     if #f >= 3 then castFails[spell] = nil; backoff(spell, how .. ' 3 times in 30s', 60000) end
 end
 mq.event('axpFizzle', 'Your #1# spell fizzles!', function(_, spell) castFailed(spell, 'fizzled') end)
 mq.event('axpInterrupt1', 'Your #1# spell is interrupted.', function(_, spell) castFailed(spell, 'interrupted') end)
-mq.event('axpInterrupt2', 'Your spell is interrupted.', function() castFailed(R.cast and R.cast.name, 'interrupted') end)
+mq.event('axpInterrupt2', 'Your spell is interrupted.', function() castFailed(R.cast and R.cast.name or (R.lastCast and mq.gettime() - R.lastCast.endedAt < 3000 and R.lastCast.name) or nil, 'interrupted') end)
 
 local function spellReady(name)
     if name == '' or blocked(name) or not mq.TLO.Me.Gem(name)() then return false end
@@ -2058,7 +2064,7 @@ local function memNukes()
             if isBuff[s.Name()] then table.insert(buffGems, { g = i, lvl = s.Level() or 0, name = s.Name() }) end
             -- a nuke whose duty is off (and that isn't the Hunter's pull spell) holds a free gem
             if not S.nuke and not k and s.SpellType() ~= 'Beneficial' and s.Category() == 'Direct Damage'
-                and not (s.Subcategory() or ''):find('Stun') and not (S.mode == 'Hunter' and s.Name() == S.pullSpell) then
+                and not (s.Subcategory() or ''):find('Stun') and not ((S.mode == 'Hunter' or S.mode == 'Named') and s.Name() == S.pullSpell) then
                 table.insert(buffGems, { g = i, lvl = s.Level() or 0, name = s.Name() })
             end
         else
@@ -2145,7 +2151,7 @@ local function memHeals()
         local n = g() and g.Name() or ''
         local prio
         if n == '' then prio = 0
-        elseif wantSet[n] or (S.mode == 'Hunter' and n == S.pullSpell) then prio = nil
+        elseif wantSet[n] or ((S.mode == 'Hunter' or S.mode == 'Named') and n == S.pullSpell) then prio = nil
         elseif not trained(g) then prio = 1
         elseif (isNuke[n] and not S.nuke) or (isDot[n] and not S.dot) then prio = 2
         elseif isBuff[n] then prio = 3
@@ -2273,7 +2279,8 @@ local function doBuffs()
     return restoreGem()
 end
 
--- chase loot (chaseloot.lua: Night of Shadows' and Laurion's Song's chase lines and named gear): rare drops worth keeping. Out of a fight, every 3s, from the Advanced Loot
+-- chase loot (chaseloot.lua: Night of Shadows' and Laurion's Song's chase lines and named gear; named/<zone>.lua: the zone's
+-- named drops, Named mode's data): rare drops worth keeping. Out of a fight, every 3s, from the Advanced Loot
 -- window: my own personal chase drops are looted (a No Trade one only by a class that can use it), and the group leader
 -- hands out the shared ones: a tradeable one to himself, a No Trade one (its classes in chaseloot.lua) to a group member
 -- of a class that can use it - the one given fewest of it so far, skipping one who didn't take it (lore: has one).
@@ -2293,6 +2300,8 @@ local function isChase(name)
     end
     local l = name:lower()
     if CHASE.never[l] then return false end
+    local zl = FIGHT.named and FIGHT.named.lootFor(l)   -- this zone's named drops
+    if zl ~= nil then return zl end
     if CHASE.named[l] then return CHASE.named[l] end
     for _, p in ipairs(CHASE.patterns) do if l:find(p) then return true end end
     return false
@@ -2624,8 +2633,10 @@ end
 -- Rez duty: resurrect group members' corpses, and out of combat my own. In a fight only Call of the Wild, on someone
 -- still dead (back with no exp; an exp rez still works later). Out of combat a rez AA that returns exp, else the best rez
 -- spell in the book (memorized into a borrowed gem if needed) - once per corpse (it stays after the rez; remembered for
--- 3 hours across reloads). Out of combat a corpse further away is walked to first, and the Hunter tank waits for that
--- (the ${AutoXP} 'C' flag): released members' corpses were left behind while the tank kept pulling
+-- 3 hours across reloads); a group member still dead 45s after their rez (interrupted, or the offer lost) is rezzed
+-- again. Out of combat a corpse out of reach is dragged over with /corpse (a groupmate's needs their consent), never
+-- walked to - Lolelena ran visible across Timorous Falls after the tank and died (2026-10-21); one that doesn't come (out
+-- of range) is looked at again in a minute. The Hunter tank waits while it's at it (the ${AutoXP} 'C' flag)
 local doRez
 do   -- its tables stay out of the main chunk (LuaJIT allows it 200 locals)
 local REZAA = { 'Blessing of Resurrection', 'Rejuvenation of Spirit', 'Divine Resurrection' }
@@ -2645,8 +2656,11 @@ local function rezSpell()
 end
 
 local function corpseKey(c) return string.format('%s|%s|%d', mq.TLO.Zone.ShortName() or '', c.CleanName() or '', c.ID() or 0) end
-local function rezzedBefore(c)
+-- dead: the corpse's owner is still dead. Lolelena's rez on Zenban was interrupted, the interrupt was read after the cast
+-- had been let go, and he lay there marked rezzed until he released (2026-10-21 15:28)
+local function rezzedBefore(c, dead)
     local t = S.rezDone[corpseKey(c)]
+    if dead and t ~= nil and os.time() - t > 45 then return false end
     return R.rezzed[c.ID()] or (t ~= nil and os.time() - t < 10800)
 end
 local function markRezzed(c)
@@ -2678,7 +2692,8 @@ function FIGHT.rezPending()
         local n = i == 0 and ME or mq.TLO.Group.Member(i).Name()
         local c = n and mq.TLO.Spawn('pccorpse ' .. n .. "'s corpse")
         local cid = c and c() and c.ID() or 0
-        if cid > 0 and not rezzedBefore(c) and ((R.corpseSkip or {})[cid] or 0) < mq.gettime() then
+        if cid > 0 and not rezzedBefore(c, i > 0 and mq.TLO.Group.Member(i).Type() == 'Corpse') and ((R.corpseSkip or {})[cid] or 0) < mq.gettime()
+            and not (R.dragFailed or {})[cid] then
             R.rezWait[cid] = R.rezWait[cid] or mq.gettime()
             if mq.gettime() - R.rezWait[cid] < 300000 then return (i == 0 and 'my corpse' or n .. "'s corpse") .. ' is waiting for my rez' end
         end
@@ -2687,6 +2702,11 @@ end
 
 function doRez()
     if not S.rez or FIGHT.keepInvis() then return false end
+    -- the corpse I dragged over, rezzed (or gone): let go of it
+    if R.dragged and not casting() then
+        local dc = spawn(R.dragged)
+        if not (dc and dc()) or rezzedBefore(dc, false) then mq.cmd('/corpsedrop'); R.dragged = nil end
+    end
     local fight = #hostiles() > 0
     local who = {}
     for i = 1, (mq.TLO.Group.Members() or 0) do
@@ -2700,38 +2720,54 @@ function doRez()
     end
     -- my own corpse too, out of combat: resurrecting it wins the experience back
     if not fight then table.insert(who, { name = ME, me = true }) end
-    R.corpseSkip = R.corpseSkip or {}
+    R.corpseSkip, R.dragFailed = R.corpseSkip or {}, R.dragFailed or {}
     for _, w in ipairs(who) do
         local name = w.me and 'my corpse' or w.name
         local c = mq.TLO.Spawn('pccorpse ' .. w.name .. "'s corpse")
         local cid = c and c() and c.ID() or 0
         local near = cid > 0 and (c.Distance3D() or 999) < 100 and c.LineOfSight()
-        if not fight and cid > 0 and not near and not rezzedBefore(c) and (R.corpseSkip[cid] or 0) < mq.gettime() and canRez() then
-            local len = mq.TLO.Navigation.PathLength('id ' .. cid)() or -1
-            local stuck = R.corpseWalk == cid and mq.gettime() - R.corpseWalkAt > 90000
-            if len < 0 or len > 1500 or stuck then
-                -- no path (look again in a minute), too far, or still not there after 90s (leave it 10 minutes)
-                R.corpseSkip[cid] = mq.gettime() + ((len < 0 and not stuck) and 60000 or 600000)
-                if R.corpseWalk == cid then R.corpseWalk = nil; mq.cmd('/nav stop'); log('could not reach the corpse of %s - leaving it', name) end
-            else
-                if not mq.TLO.Navigation.Active() then mq.cmdf('/nav id %d distance=20', cid) end
-                if R.corpseWalk ~= cid then R.corpseWalk, R.corpseWalkAt = cid, mq.gettime(); log('walking to the corpse of %s to resurrect it', name) end
+        -- out of reach: /corpse drags it over; not here within 3s (out of range, or no consent): left for a minute, the
+        -- loop going on meanwhile
+        if not fight and cid > 0 and not near and not rezzedBefore(c, w.dead) and (R.corpseSkip[cid] or 0) < mq.gettime() and canRez() then
+            local d = R.drag
+            if not d or d.id ~= cid then
+                if targetId(cid) then
+                    mq.cmd('/corpse')
+                    R.drag, R.rezBusyAt = { id = cid, at = mq.gettime() }, mq.gettime()
+                    return true
+                end
+            elseif mq.gettime() - d.at < 3000 then
                 R.rezBusyAt = mq.gettime()
                 return true
+            else
+                if not R.dragFailed[cid] then
+                    log('/corpse did not bring %s (%.0f away: out of range, or no consent) - looking again every minute',
+                        w.me and 'my corpse' or (name .. "'s corpse"), c.Distance3D() or 0)
+                end
+                R.drag, R.corpseSkip[cid], R.dragFailed[cid] = nil, mq.gettime() + 60000, true
             end
         end
-        if near and not rezzedBefore(c) and (not fight or (w.dead and FIGHT.rezNow(w.name))) then
+        if near and R.drag and R.drag.id == cid then
+            log('dragged %s over with /corpse', w.me and 'my corpse' or (name .. "'s corpse"))
+            R.drag, R.dragged, R.dragFailed[cid] = nil, cid, nil
+        end
+        if near and not rezzedBefore(c, w.dead) and (not fight or (w.dead and FIGHT.rezNow(w.name))) then
             local key = c.ID() .. '|rez'
             for _, n in ipairs(fight and COMBATREZ or REZAA) do
                 if mq.TLO.Me.AltAbilityReady(n)() and mq.gettime() - (R.buffTry[key] or 0) > (fight and 10000 or 60000) and targetId(c.ID()) then
                     R.buffTry[key], R.rezBusyAt = mq.gettime(), mq.gettime()
                     if mq.TLO.Me.Sitting() then mq.cmd('/stand'); mq.delay(300) end
+                    -- held still for the cast: that rez on Zenban broke as Chase set off after the tank mid-cast
+                    local resume = holdMovement()
+                    local again = w.dead and S.rezDone[corpseKey(c)] ~= nil
                     mq.cmdf('/alt act %d', mq.TLO.Me.AltAbility(n).ID() or 0)
                     mq.delay(1000, casting)
                     if casting() or not mq.TLO.Me.AltAbilityReady(n)() then
-                        log('rez %s (%s)', name, n)
+                        log('rez %s (%s)%s', name, n, again and ' - again, the last one did not take' or '')
                         local rk = not fight and markRezzed(c) or nil
-                        if casting() then R.cast = { name = n, id = c.ID(), kind = 'heal', resume = function() end, rezKey = rk } end
+                        if casting() then R.cast = { name = n, id = c.ID(), kind = 'heal', resume = resume, rezKey = rk } else resume() end
+                    else
+                        resume()
                     end
                     return true
                 end
@@ -2756,6 +2792,7 @@ local function engage(id)
     log('engage %s (L%d %s) at %.0f', R.targetName, t.Level() or 0, t.Class.ShortName() or '?', t.Distance() or 0)
     if S.mode == 'Manual' then setState('FIGHT'); return end
     R.pull, R.pullWait, R.holdUntil = R.pullCandidate and pullPlan() or nil, nil, 0
+    R.groupWait, R.groupWaitLogged = nil, nil
     if R.pull then
         R.pull.dist, R.pullTries = math.min(S.pullDist, R.pull.range * 0.8), 0
         log('pulling with %s %s from %d', R.pull.how:lower(), R.pull.name, R.pull.dist)
@@ -2793,8 +2830,23 @@ local function followPick(st)
     return true
 end
 
--- reasons not to pull yet: resurrection sickness (mine or a group member's), a dead or missing member,
--- a healer or CC class under "Rest below %" mana
+-- a group member here and alive further than r from me (the farthest), or nil: the tank doesn't pull alone. Ramakrr
+-- walked 2,900 to a pull while the group, following its main tank Zenban, stayed at the campfire, and died (2026-10-21)
+function FIGHT.groupFar(r)
+    local far, fd
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        if m.Name() and not m.OtherZone() and m.Present() and m.Type() ~= 'Corpse' then
+            local d = m.Distance3D() or 0
+            if d > r and (not fd or d > fd) then far, fd = m.Name(), d end
+        end
+    end
+    return far, fd
+end
+FIGHT.GROUPNEAR = 200
+
+-- reasons not to pull yet: resurrection sickness (mine or a group member's), a dead or missing member, one not with me
+-- (over FIGHT.GROUPNEAR away), a healer or CC class under "Rest below %" mana
 local SICK = { 'Resurrection Sickness', 'Revival Sickness' }
 -- classes the Hunter waits for (mana under the rest %): healers, CC and the nukers (a nuker out of mana stops nuking)
 local HEALCC = { CLR = true, DRU = true, SHM = true, ENC = true, BRD = true, MAG = true, WIZ = true, NEC = true }
@@ -2806,6 +2858,14 @@ local function pullHold(travel)
     if buffer then return buffer .. ' is buffing' end
     local rezzer = DPS.peerRezzing and DPS.peerRezzing()
     if rezzer then return rezzer .. ' is resurrecting a corpse' end
+    if not travel then
+        local far = FIGHT.groupFar(FIGHT.GROUPNEAR)
+        if far then
+            local mt = mq.TLO.Group.MainTank.Name() or ''
+            return string.format('%s is not with me (over %d away)%s', far, FIGHT.GROUPNEAR,
+                (mt ~= '' and mt ~= ME) and string.format(' - the group main tank is %s: Chase follows them', mt) or '')
+        end
+    end
     for i = 1, (mq.TLO.Group.Members() or 0) do
         local m = mq.TLO.Group.Member(i)
         local name = m.Name() or '?'
@@ -2830,7 +2890,8 @@ end
 
 -- Travel (the Travel tab, /autoxp travel <zone>): EasyFind's /travelto, in any mode, AutoXP started or not. A trip
 -- leaves once nothing holds it back - no fight, the pull holds (not for members elsewhere), my own mana, my corpse in the
--- Guild Lobby, a corpse here waiting for my rez - and on the way a running AutoXP only heals, mezzes and defends.
+-- Guild Lobby, a corpse here waiting for my rez - and on the way a running AutoXP heals, mezzes and defends, and stops to
+-- fight a mob on the extended target list within 150 of it or of the main tank (then sets off again).
 -- Whole group: Travel and Stop go to the group too (DanNet). Return after death: alive again in another zone (a respawn
 -- at the bind point), back to the zone I died in, or the trip I was on. Ramakrr respawned in the Guild Lobby with the
 -- group, set off for Deepshade alone at 10% mana and died on the way (2026-10-19 22:36)
@@ -2856,8 +2917,26 @@ local function corpseHold()
     if mq.gettime() - R.corpseHereAt < 180000 then return 'my corpse is waiting for a rez' end
 end
 
+-- a fight on the way: an NPC on the extended target list within 150 of me or of the group's main tank (members ahead of
+-- the tank stop with it). Ramakrr ran on for the zone line with mobs on the group (2026-10-21)
+local function aggro()
+    if #hostiles() > 0 then return true end
+    local mt = mq.TLO.Group.MainTank
+    local s = mt() and not mt.OtherZone() and mt.Spawn or nil
+    if not s or not s() or s.Type() == 'Corpse' or s.ID() == myId() then return false end
+    local mx, my = s.X() or 0, s.Y() or 0
+    for i = 1, (mq.TLO.Me.XTarget() or 0) do
+        local x = mq.TLO.Me.XTarget(i)
+        if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' then
+            local dx, dy = (x.X() or 0) - mx, (x.Y() or 0) - my
+            if dx * dx + dy * dy < 22500 and alive(spawn(x.ID())) then return true end
+        end
+    end
+    return false
+end
+
 local function held()
-    local hold = (#hostiles() > 0 or R.state == 'FIGHT' or R.state == 'APPROACH' or R.pickId ~= 0) and 'a fight' or pullHold(true)
+    local hold = (aggro() or R.state == 'FIGHT' or R.state == 'APPROACH' or R.pickId ~= 0) and 'a fight' or pullHold(true)
     if not hold and (mq.TLO.Me.MaxMana() or 0) > 0 and mana() < S.restPct then hold = string.format('I am at %d%% mana', mana()) end
     hold = hold or corpseHold() or FIGHT.rezPending()
     if hold and hold ~= R.travelWhy then log('not traveling yet: %s', hold) end
@@ -2962,6 +3041,12 @@ function TRIP.tick()
         log('traveling to %s (here: %s)', t.zone, here)
         setState('TRAVEL')
         return true
+    end
+    if R.running and aggro() then
+        mq.cmd('/travelto stop'); t.going = false
+        log('aggro on the way to %s - stopping to fight', t.zone)
+        setState('FIND')
+        return false
     end
     if R.state ~= 'TRAVEL' then setState('TRAVEL') end
     -- progress / stall detection (moving or zoning counts as progress)
@@ -3104,6 +3189,19 @@ function FIGHT.routeBlockers(c, mobs)
     return out
 end
 
+-- Named mode (named.lua): FIGHT.named - the zone's named and placeholders, the route and the invisible walks
+do
+    local ok, mod = pcall(dofile, mq.luaDir .. '/autoxp/named.lua')
+    if ok and type(mod) == 'function' then
+        FIGHT.named = mod({ S = S, R = R, log = log, list = list, alive = alive, hostiles = hostiles, casting = casting,
+            zoneInfo = zoneInfo, DPS = DPS })
+    else
+        log('named.lua failed to load: %s', tostring(mod))
+    end
+end
+-- /autoxp invis [ivu] asked of me (a Named walk): my invis AAs, before anything else that casts
+function FIGHT.invisNow() return FIGHT.named ~= nil and FIGHT.named.invisTick() end
+
 local function pickTarget()
     -- anything already on us comes first (priority order); a non-tank following the group waits for it to reach the tank
     R.pendingDetour, R.pullCandidate = nil, false
@@ -3118,7 +3216,7 @@ local function pickTarget()
         local t = mq.TLO.Target
         if t() and t.Type() == 'NPC' and R.attacking then return t.ID() end
         return nil
-    elseif S.mode == 'Hunter' then
+    elseif S.mode == 'Hunter' or S.mode == 'Named' then
         -- a mob already on the extended target list (on its way, or beyond hostiles() range): go for the nearest
         -- one; never pull another while any is listed (an unreachable one just means waiting)
         local listed, near, nd = false, nil, nil
@@ -3138,6 +3236,7 @@ local function pickTarget()
             return nil
         end
         if R.holdWhy then log('group ready - pulling again'); R.holdWhy = nil end
+        if S.mode == 'Named' then return FIGHT.named and FIGHT.named.pick() end   -- the zone's named and placeholders only
         -- route checks cost: look for a new pull at most every 1.5s
         if mq.gettime() - R.lastHunt < 1500 then return nil end
         R.lastHunt = mq.gettime()
@@ -3280,7 +3379,7 @@ local function watchCast()
     local song = mq.TLO.Me.Class.ShortName() == 'BRD' and (not c or c.kind ~= 'cc')
     if not c then return casting() and not song end
     if not casting() then
-        R.cast = nil; c.resume()
+        R.cast, R.lastCast, c.endedAt = nil, c, mq.gettime(); c.resume()
         if c.id ~= R.targetId then restoreFight() end
         return false
     end
@@ -3323,6 +3422,70 @@ end
 
 -- one tick of the state machine -----------------------------------------------------------
 -- the FIGHT state, split out of step() (LuaJIT allows a function 60 upvalues)
+-- archery: standing at ex, ey instead of here mustn't take me toward another NPC within the alone radius (one on the
+-- extended target list, a grey one or a Find Window NPC doesn't count) - Seaeni backed into more mobs and pulled them
+-- (2026-10-21)
+function FIGHT.spotClear(t, ex, ey)
+    local mx, my, mz = mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0, mq.TLO.Me.Z() or 0
+    local listed, npcs = {}, findable()
+    for i = 1, (mq.TLO.Me.XTarget() or 0) do listed[mq.TLO.Me.XTarget(i).ID() or 0] = true end
+    local q = string.format('npc loc %.0f %.0f %.0f radius %d zradius 40', ex, ey, mz, S.avoidRadius)
+    for i = 1, math.min(mq.TLO.SpawnCount(q)() or 0, 20) do
+        local s = mq.TLO.NearestSpawn(i, q)
+        if not s() then break end
+        if s.ID() ~= t.ID() and not listed[s.ID() or 0] and s.ConColor() ~= 'GREY' and not npcs[(s.CleanName() or ''):lower()] then
+            local sx, sy = s.X() or 0, s.Y() or 0
+            if (sx - ex) ^ 2 + (sy - ey) ^ 2 < (sx - mx) ^ 2 + (sy - my) ^ 2 then return false end   -- I'd walk toward it
+        end
+    end
+    return true
+end
+
+-- MoveUtils moveback: straight away from t to ARCHERY off it
+function FIGHT.backClear(t)
+    local tx, ty = t.X() or 0, t.Y() or 0
+    local dx, dy = (mq.TLO.Me.X() or tx) - tx, (mq.TLO.Me.Y() or ty) - ty
+    local d = math.sqrt(dx * dx + dy * dy)
+    if d < 1 then return false end   -- on top of it: no way to tell which way I'd go
+    return FIGHT.spotClear(t, tx + dx / d * ARCHERY, ty + dy / d * ARCHERY)
+end
+
+-- straight back isn't clear: the nearest side of t to back away on instead - ARCHERY off it, turning 30 degrees at a time
+-- either way from where I stand, the first spot that is clear and a short path reaches
+function FIGHT.backSpot(t)
+    local tx, ty, tz = t.X() or 0, t.Y() or 0, t.Z() or 0
+    local base = math.atan2((mq.TLO.Me.Y() or ty) - ty, (mq.TLO.Me.X() or tx) - tx)
+    for _, deg in ipairs({ 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180 }) do
+        local a = base + math.rad(deg)
+        local x, y = tx + math.cos(a) * ARCHERY, ty + math.sin(a) * ARCHERY
+        if FIGHT.spotClear(t, x, y) then
+            local len = mq.TLO.Navigation.PathLength(string.format('locxyz %.1f %.1f %.1f', x, y, tz))() or -1
+            if len >= 0 and len < ARCHERY * 2.5 then return { x = x, y = y, z = tz, deg = math.abs(deg) } end
+        end
+    end
+end
+
+-- a melee DPS that casts (not the tank, not a bard) still walking behind its target (MoveUtils stick behind): up to 4s
+-- before the duties, burns and DPS stop it for a cast - every cast pauses the stick, and Lolelena, casting every second
+-- or two, meleed from the mob's face all fight (2026-10-21). 4s without getting there (a wall, the mob turning): the
+-- casts go on, and it tries again in 15s. Heals, mezzes and defense (step(), before the fight) never wait
+function FIGHT.behindFirst(t)
+    if ranged() or S.role == 'Tank' or (mq.TLO.Me.MaxMana() or 0) == 0 or mq.TLO.Me.Class.ShortName() == 'BRD' then return false end
+    local st, now = mq.TLO.Stick, mq.gettime()
+    if not st.Active() or st.Paused() or not st.MoveBehind() or not reachable(t, 35) then return false end
+    local w = R.behindWait
+    if not w or w.id ~= t.ID() then w = { id = t.ID(), at = 0, next = 0 }; R.behindWait = w end
+    if st.Behind() then w.at = 0; return false end
+    if w.at == 0 then
+        if now < w.next then return false end
+        w.at = now
+        if not w.logged then w.logged = true; log('getting behind %s before casting', t.CleanName()) end
+    end
+    if now - w.at < 4000 then return true end
+    w.at, w.next = 0, now + 15000
+    return false
+end
+
 local function fightTick()
     local t = spawn(R.targetId)
     if not alive(t) and (mq.TLO.Zone.ShortName() or '') ~= R.fightZone then
@@ -3341,7 +3504,7 @@ local function fightTick()
             attackOn(); closeIn(nextT); setState('FIGHT'); return
         end
         attackOff(); mq.cmd('/stick off'); petBackOff(); R.targetId = 0
-        setState((S.mode == 'Hunter' and (hp() < S.restPct or manaLow())) and 'REST' or 'BUFF')
+        setState(((S.mode == 'Hunter' or S.mode == 'Named') and (hp() < S.restPct or manaLow())) and 'REST' or 'BUFF')
         return
     end
     if doRez() then return end
@@ -3357,7 +3520,7 @@ local function fightTick()
         end
     end
     if (mq.TLO.Target.ID() or 0) ~= R.targetId or not R.attacking then restoreFight() end
-    if hp() < 12 and S.mode == 'Hunter' and (mq.TLO.Group.Members() or 0) == 0 then stopAll('HP critical'); return end
+    if hp() < 12 and (S.mode == 'Hunter' or S.mode == 'Named') and (mq.TLO.Group.Members() or 0) == 0 then stopAll('HP critical'); return end
     if FIGHT.tankBuffs() then return end
     if not ranged() and mq.gettime() < R.holdUntil then
         if reachable(t, 35) then
@@ -3370,12 +3533,41 @@ local function fightTick()
     if archer() then
         -- keep facing it (auto-fire only shoots what's in front) and keep auto-fire on once it's in range
         if mq.gettime() - R.lastFace > 1500 then mq.cmdf('/face fast id %d', t.ID()); R.lastFace = mq.gettime() end
-        if not mq.TLO.Me.AutoFire() and reachable(t, S.castRange) then mq.cmd('/autofire') end
-        -- in range: hold ARCHERY units off it, backing up when it comes closer (MoveUtils moveback)
-        if reachable(t, S.castRange) and not mq.TLO.Navigation.Active()
-            and (not mq.TLO.Stick.Active() or mq.gettime() - R.tooCloseAt < 1000) then
-            R.tooCloseAt = 0
-            mq.cmdf('/stick id %d %d moveback', t.ID(), ARCHERY)
+        -- holding (NPCs behind me) with it too close to shoot: melee it until it is back out at range
+        if R.archMelee and (R.archMelee ~= t.ID() or (t.Distance3D() or 0) > ARCHERY) then R.archMelee = nil; mq.cmd('/attack off') end
+        if not R.archMelee and R.archHold == t.ID() and mq.gettime() - R.tooCloseAt < 1500 and reachable(t, 25) then
+            R.archMelee = t.ID()
+            if mq.TLO.Me.AutoFire() then mq.cmd('/autofire') end
+            mq.cmd('/attack on')
+            log('%s is too close to shoot and backing away would pull more - melee', t.CleanName())
+        end
+        if not R.archMelee and not mq.TLO.Me.AutoFire() and reachable(t, S.castRange) then mq.cmd('/autofire') end
+        -- in range: hold ARCHERY units off it, backing up when it comes closer (MoveUtils moveback) while that wouldn't
+        -- take me toward other NPCs (looked at every second). Otherwise, once it is close, walk around it to a side where
+        -- backing up is clear (FIGHT.backSpot; one walk per 5s); with none, hold where I stand
+        if reachable(t, S.castRange) and not mq.TLO.Navigation.Active() then
+            local now = mq.gettime()
+            if R.archBackId ~= t.ID() or now - (R.backCheckAt or 0) > 1000 then
+                R.archBackId, R.backCheckAt, R.archBack = t.ID(), now, FIGHT.backClear(t)
+                local spot = not R.archBack and (t.Distance3D() or 999) < ARCHERY - 5 and now - (R.archRotAt or 0) > 5000
+                    and FIGHT.backSpot(t)
+                if spot then
+                    log('NPCs behind me - going %d degrees around %s to back away from it there', spot.deg, t.CleanName())
+                    mq.cmd('/stick off')
+                    mq.cmdf('/nav locxyz %.1f %.1f %.1f', spot.x, spot.y, spot.z)
+                    R.lastNav, R.archRotAt, R.archMoveUntil = now, now, now + 4000
+                    R.archStick, R.archHold, R.backCheckAt = nil, nil, 0   -- looked at again on arrival
+                else
+                    if not R.archBack and R.archHold ~= t.ID() then log('NPCs behind me - holding here instead of backing away from %s', t.CleanName()) end
+                    R.archHold = not R.archBack and t.ID() or nil
+                end
+            end
+            local want = string.format('%d%s', t.ID(), R.archBack and ' moveback' or '')
+            if now - (R.archRotAt or 0) < 500 then   -- the walk around just started (/nav not active yet)
+            elseif not mq.TLO.Stick.Active() or now - R.tooCloseAt < 1000 or want ~= R.archStick then
+                R.tooCloseAt, R.archStick = 0, want
+                mq.cmdf('/stick id %d %d%s', t.ID(), ARCHERY, R.archBack and ' moveback' or '')
+            end
         elseif not reachable(t, S.castRange) and mq.TLO.Stick.Active() then
             mq.cmd('/stick off')
         end
@@ -3384,7 +3576,9 @@ local function fightTick()
         -- stay in casting range with line of sight
         local far = not reachable(t, S.castRange)
         if far and not mq.TLO.Navigation.Active() and mq.gettime() - R.lastNav > 3000 then navTo(t.ID())
-        elseif not far and mq.TLO.Navigation.Active() and reachable(t, S.castRange * 0.8) then mq.cmd('/nav stop') end
+        elseif not far and mq.TLO.Navigation.Active() and reachable(t, S.castRange * 0.8) and mq.gettime() > (R.archMoveUntil or 0) then
+            mq.cmd('/nav stop')
+        end
     end
     if not ranged() then
         -- out of reach (too far, another floor or behind a wall): path to it; stick only once it's in sight
@@ -3399,6 +3593,7 @@ local function fightTick()
     if doTank(t) then return end
     if doShed(t) then return end
     if FIGHT.petGuard() then return end
+    if FIGHT.behindFirst(t) then return end
     if doDuties(t) then return end
     if doBurn(t) then return end
     if FIGHT.selfCombatBuffs() then return end
@@ -3431,6 +3626,7 @@ local function step()
     if doMalo() then return end
     if R.state ~= 'FIGHT' and R.state ~= 'REST' and doSongs() then return end
     if doDefense() then return end
+    if FIGHT.invisNow() then return end
     local st = R.state
     if followPick(st) then return end
     -- a trip (Travel tab): once it leaves, nothing else but the heals, mez and defense above until it arrives
@@ -3508,6 +3704,24 @@ local function step()
             end
             return
         end
+        -- a pull (nothing on us yet) waits near it for the group to catch up - a long Named walk can leave it behind; 60s
+        -- at most, then the pick is dropped and the pull holds wait for them
+        if R.pullCandidate and (t.Distance3D() or 999) < math.max(S.pullDist, R.pull and R.pull.dist or 0) + 60 then
+            local far = FIGHT.groupFar(FIGHT.GROUPNEAR)
+            if far then
+                R.groupWait = R.groupWait or mq.gettime()
+                if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+                if mq.gettime() - R.groupWait > 60000 then
+                    log('%s never caught up - not pulling %s', far, R.targetName)
+                    R.groupWait, R.targetId, R.pickId = nil, 0, 0; setState('FIND')
+                elseif not R.groupWaitLogged then
+                    R.groupWaitLogged = true; log('waiting for the group before pulling %s: %s is not with me', R.targetName, far)
+                end
+                return
+            elseif R.groupWait then
+                R.groupWait = nil; log('group caught up - pulling %s', R.targetName)
+            end
+        end
         if R.pull and reachable(t, R.pull.dist, true) then
             if mq.TLO.Navigation.Active() or mq.TLO.Me.Moving() then
                 -- come to a full stop first: a pull cast right after /nav stop gets interrupted (a bard's song isn't)
@@ -3549,7 +3763,7 @@ local function step()
                 log('no path to %s - skipping it', R.targetName)
                 R.skip[t.ID()] = mq.gettime() + 120000; R.targetId, R.pickId = 0, 0; setState('FIND')
             end
-        elseif inState() > 120000 then log('approach timeout'); mq.cmd('/nav stop'); R.pickId = 0; setState('FIND') end
+        elseif inState() > (S.mode == 'Named' and 300000 or 120000) then log('approach timeout'); mq.cmd('/nav stop'); R.pickId = 0; setState('FIND') end
 
     elseif st == 'FIGHT' then
         fightTick()
@@ -3838,7 +4052,7 @@ do
         local now = mq.gettime()
         if now - P.at >= 1000 then P.at, P.status = now, buildStatus() end
         -- a running Hunter reads its groupmates even with both windows hidden: it waits for their buffs and rezzes
-        if not S.showPeers and not S.showHud and not (R.running and S.mode == 'Hunter') then
+        if not S.showPeers and not S.showHud and not (R.running and (S.mode == 'Hunter' or S.mode == 'Named')) then
             for peer in pairs(P.observing) do mq.cmdf('/dobserve %s -q AutoXP -drop', peer) end
             P.observing, P.rows = {}, {}
             return
@@ -4043,6 +4257,22 @@ do
         end
     end
 
+    -- group members here (me too) not invisible (needI) or not invisible versus undead (needU), from their ${AutoXP}
+    -- flags; one without a fresh status can't be told and isn't counted
+    function DPS.notInvis(needI, needU)
+        local grp, out, me = {}, {}, mq.TLO.Me
+        for i = 1, (mq.TLO.Group.Members() or 0) do
+            local m = mq.TLO.Group.Member(i)
+            if m() and m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse' then grp[m.Name() or ''] = true end
+        end
+        if (needI and not me.Invis(1)()) or (needU and not me.Invis(2)()) then out[#out + 1] = ME end
+        for _, r in ipairs(P.rows) do
+            if not r.me and grp[r.name] and r.d and r.fresh and r.d.run == 'run'
+                and ((needI and not r.d.flags:find('I')) or (needU and not r.d.flags:find('U'))) then out[#out + 1] = r.name end
+        end
+        return out
+    end
+
     function DPS.drawHud()
         if not S.showHud then return end
         ImGui.SetNextWindowBgAlpha(0.6)
@@ -4129,6 +4359,7 @@ function draw()
 
         ImGui.SetNextItemWidth(110)
         local m = combo('Mode', S.mode, MODES)
+        tip('Hunter: pull mobs in level range around me. Named: only this zone\'s named and their placeholders (Named tab).\nAssist: fight the main assist\'s target. Chase: follow and assist the main tank. Manual: fight what I target.')
         if m ~= S.mode then S.mode = m; log('mode %s', m) end
         updateMapRadius()
         ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); flow(70); roleButton('DPS')
@@ -4145,7 +4376,7 @@ function draw()
         flow(70)
         toggle('DoT', 'dot', 'DoT: put each damage-over-time spell on the target once (DoTs list) while it is above 40%.')
         flow(70)
-        toggle('Rez', 'rez', 'Rez: in a fight, Call of the Wild on a dead group member (no exp, they can still get an exp rez).\nOut of combat, an exp rez AA (Blessing of Resurrection, Rejuvenation of Spirit) or your best rez spell, once per corpse.')
+        toggle('Rez', 'rez', 'Rez: in a fight, Call of the Wild on a dead group member (no exp, they can still get an exp rez).\nOut of combat, an exp rez AA (Blessing of Resurrection, Rejuvenation of Spirit) or your best rez spell, once per corpse (again if they are still dead 45s later).')
         flow(70)
         toggle('Buff', 'buff', 'Buff: keep group members buffed too. HP, AC, resist and Unity buffs go to everyone,\nhaste, attack and strength to melee, mana regen to classes that use mana.')
         ImGui.Separator()
@@ -4362,7 +4593,7 @@ function draw()
                 elseif ImGui.Button('Travel', 100, 26) and S.travelZone ~= '' then
                     TRIP.go(S.travelZone)
                 end
-                tip('EasyFind /travelto the destination, in any mode, AutoXP started or not (/autoxp travel <zone>, /autoxp travel stop).\nIt leaves once nothing holds it back: no fight, HP and mana above "Rest below %", no resurrection sickness,\nnobody in the group dead or low. On the way it only heals, mezzes and defends.')
+                tip('EasyFind /travelto the destination, in any mode, AutoXP started or not (/autoxp travel <zone>, /autoxp travel stop).\nIt leaves once nothing holds it back: no fight, HP and mana above "Rest below %", no resurrection sickness,\nnobody in the group dead or low. On the way it heals, mezzes and defends, and stops to fight a mob\non the extended target list within 150 of it or the main tank.')
                 flow(200)
                 local tr = R.trip
                 ImGui.PushTextWrapPos(0)
@@ -4413,6 +4644,15 @@ function draw()
                 end
                 ImGui.EndTabItem()
             end
+            if ImGui.BeginTabItem('Named') then
+                if FIGHT.named then
+                    local okN, errN = pcall(FIGHT.named.draw)
+                    if not okN then oops('Named tab', errN) end
+                else
+                    ImGui.TextDisabled('named.lua did not load - see the log')
+                end
+                ImGui.EndTabItem()
+            end
             if ImGui.BeginTabItem('Log') then
                 -- newest on top
                 for i = #R.log, math.max(1, #R.log - 30), -1 do ImGui.TextWrapped(R.log[i]) end
@@ -4457,6 +4697,8 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif cmd == 'travel' then
         -- /autoxp travel <zone> | stop (solo: this character only, never passed on to the group)
         if a1 == 'stop' then TRIP.cancel(a2 == 'solo') else TRIP.go(a1 or S.travelZone, a2 == 'solo') end
+    elseif cmd == 'invis' then R.invisWant = { ivu = a1 == 'ivu', at = mq.gettime() }   -- the Named leader, before a walk
+    elseif cmd == 'named' and FIGHT.named then FIGHT.named.command(a1)
     elseif cmd == 'group' then S.showPeers = not S.showPeers
     elseif cmd == 'hud' then S.showHud = not S.showHud
     elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
@@ -4469,7 +4711,7 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
 
 startSpellScan()
 if args[1] then TRIP.go(args[1]) end
@@ -4490,6 +4732,8 @@ while not R.terminate do
     if mq.gettime() - (R.savedAt or 0) > 15000 then R.savedAt = mq.gettime(); pcall(save) end
     local pok, perr = pcall(peersTick)
     if not pok and perr ~= R.peerErr then R.peerErr = perr; log('group view error: %s', tostring(perr)) end
+    -- the Named tab's Look now: a pass of spawn searches, not in the window's callback (it can't wait)
+    if FIGHT.named and FIGHT.named.wantLook then FIGHT.named.wantLook = false; pcall(FIGHT.named.scan) end
     -- a trip with AutoXP stopped (Travel tab, /autoxp travel); a running AutoXP travels from step()
     if R.trip and not R.running then
         local tok, terr = pcall(TRIP.tick)

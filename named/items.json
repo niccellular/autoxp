@@ -1,0 +1,892 @@
+{
+ "151485": {
+  "classes": "ALL",
+  "name": "Acolyte's Focus of Legacies Lost",
+  "notrade": true
+ },
+ "151943": {
+  "classes": "ALL",
+  "name": "Gallant Wrist Armor Lining",
+  "notrade": true
+ },
+ "151944": {
+  "classes": "ALL",
+  "name": "Gallant Hand Armor Lining",
+  "notrade": true
+ },
+ "151945": {
+  "classes": "ALL",
+  "name": "Gallant Feet Armor Lining",
+  "notrade": true
+ },
+ "151946": {
+  "classes": "ALL",
+  "name": "Gallant Head Armor Lining",
+  "notrade": true
+ },
+ "151947": {
+  "classes": "ALL",
+  "name": "Gallant Arm Armor Lining",
+  "notrade": true
+ },
+ "151948": {
+  "classes": "ALL",
+  "name": "Gallant Leg Armor Lining",
+  "notrade": true
+ },
+ "151949": {
+  "classes": "ALL",
+  "name": "Gallant Chest Armor Lining",
+  "notrade": true
+ },
+ "151957": {
+  "classes": "ALL",
+  "name": "Gallant Earring Clasp",
+  "notrade": true
+ },
+ "151958": {
+  "classes": "ALL",
+  "name": "Gallant Mask Fastener",
+  "notrade": true
+ },
+ "151959": {
+  "classes": "ALL",
+  "name": "Gallant Necklace Clasp",
+  "notrade": true
+ },
+ "151960": {
+  "classes": "ALL",
+  "name": "Gallant Amice Fastener",
+  "notrade": true
+ },
+ "151961": {
+  "classes": "ALL",
+  "name": "Gallant Cloak Fastener",
+  "notrade": true
+ },
+ "151962": {
+  "classes": "ALL",
+  "name": "Gallant Idol Polishing Cloth",
+  "notrade": true
+ },
+ "151963": {
+  "classes": "ALL",
+  "name": "Gallant Ring Polishing Cloth",
+  "notrade": true
+ },
+ "151964": {
+  "classes": "ALL",
+  "name": "Gallant Belt Buckle",
+  "notrade": true
+ },
+ "151965": {
+  "classes": "ALL",
+  "name": "Gallant Charm Polishing Cloth",
+  "notrade": true
+ },
+ "151975": {
+  "classes": "ALL",
+  "name": "Gallant Shield Enarmes",
+  "notrade": true
+ },
+ "151976": {
+  "classes": "ALL",
+  "name": "Gallant Essence of Finesse",
+  "notrade": true
+ },
+ "151977": {
+  "classes": "ALL",
+  "name": "Gallant Essence of Power",
+  "notrade": true
+ },
+ "151978": {
+  "classes": "ALL",
+  "name": "Gallant String Serving",
+  "notrade": true
+ },
+ "151983": {
+  "classes": "ALL",
+  "name": "Gallant Focus of Fortitude",
+  "notrade": true
+ },
+ "151984": {
+  "classes": "ALL",
+  "name": "Gallant Focus of Heroism",
+  "notrade": true
+ },
+ "164576": {
+  "classes": "ALL",
+  "name": "Minor Etched Rune of Nokk",
+  "notrade": false
+ },
+ "164577": {
+  "classes": "ALL",
+  "name": "Lesser Etched Rune of Nokk",
+  "notrade": false
+ },
+ "164578": {
+  "classes": "ALL",
+  "name": "Median Etched Rune of Nokk",
+  "notrade": false
+ },
+ "164579": {
+  "classes": "ALL",
+  "name": "Greater Etched Rune of Nokk",
+  "notrade": false
+ },
+ "164580": {
+  "classes": "ALL",
+  "name": "Glowing Etched Rune of Nokk",
+  "notrade": false
+ },
+ "171113": {
+  "classes": "BST MAG NEC",
+  "name": "Forgebound Emberquartz Earring of the Minion",
+  "notrade": false
+ },
+ "171114": {
+  "classes": "ALL",
+  "name": "Lustrous Lapidified Bauble",
+  "notrade": false
+ },
+ "171115": {
+  "classes": "ALL",
+  "name": "Bunny Song",
+  "notrade": false
+ },
+ "171116": {
+  "classes": "ALL",
+  "name": "Phoenix Tear",
+  "notrade": false
+ },
+ "171118": {
+  "classes": "ALL",
+  "name": "Geonidian Steely Mask",
+  "notrade": false
+ },
+ "171119": {
+  "classes": "ALL",
+  "name": "Oni Mask of Horatio",
+  "notrade": false
+ },
+ "171120": {
+  "classes": "ALL",
+  "name": "Sorcerer's Outro Talisman",
+  "notrade": false
+ },
+ "171121": {
+  "classes": "ALL",
+  "name": "Illusory Indicolite Lavaliere",
+  "notrade": false
+ },
+ "171122": {
+  "classes": "ALL",
+  "name": "Choker of Collected Ire",
+  "notrade": false
+ },
+ "171123": {
+  "classes": "ALL",
+  "name": "Thick Fur Ensemble",
+  "notrade": false
+ },
+ "171124": {
+  "classes": "ALL",
+  "name": "Incandescent Spiritualist Mantle",
+  "notrade": false
+ },
+ "171125": {
+  "classes": "ALL",
+  "name": "Pauldrons of the Steely Myrmidon",
+  "notrade": false
+ },
+ "171127": {
+  "classes": "ALL",
+  "name": "Vermilion Coda of Tribute",
+  "notrade": false
+ },
+ "171128": {
+  "classes": "ALL",
+  "name": "Nightstalker's Embrace",
+  "notrade": false
+ },
+ "171129": {
+  "classes": "ALL",
+  "name": "Chalice of Celebration",
+  "notrade": false
+ },
+ "171130": {
+  "classes": "ALL",
+  "name": "Ruminate",
+  "notrade": false
+ },
+ "171131": {
+  "classes": "ALL",
+  "name": "Chiseled Chelicera",
+  "notrade": false
+ },
+ "171132": {
+  "classes": "ALL",
+  "name": "Shoru's Elastic Band",
+  "notrade": false
+ },
+ "171133": {
+  "classes": "ALL",
+  "name": "Band of Delirious Rambling",
+  "notrade": false
+ },
+ "171134": {
+  "classes": "ALL",
+  "name": "Queen's Royal Forgebound Ring",
+  "notrade": false
+ },
+ "171135": {
+  "classes": "ALL",
+  "name": "Cummerbund of Crippling Revelation",
+  "notrade": false
+ },
+ "171136": {
+  "classes": "ALL",
+  "name": "Glimmerglish",
+  "notrade": false
+ },
+ "171137": {
+  "classes": "ALL",
+  "name": "Ethereal Embrace",
+  "notrade": false
+ },
+ "171138": {
+  "classes": "ALL",
+  "name": "Undulating Ocelli",
+  "notrade": false
+ },
+ "171139": {
+  "classes": "ALL",
+  "name": "Song's Faint Memento",
+  "notrade": false
+ },
+ "171140": {
+  "classes": "ALL",
+  "name": "Mooga",
+  "notrade": false
+ },
+ "171141": {
+  "classes": "BRD PAL SHD WAR",
+  "name": "Magna's Refrain",
+  "notrade": false
+ },
+ "171143": {
+  "classes": "CLR DRU ENC MAG NEC SHM WIZ",
+  "name": "Diminutive Dissonant Defender",
+  "notrade": false
+ },
+ "171144": {
+  "classes": "BRD RNG ROG WAR",
+  "name": "Forgebound Smallsword of Remembered Revelation",
+  "notrade": false
+ },
+ "171145": {
+  "classes": "BRD RNG ROG WAR",
+  "name": "Fandrel's Melody",
+  "notrade": false
+ },
+ "171146": {
+  "classes": "BRD BST MNK RNG ROG WAR",
+  "name": "Abide",
+  "notrade": false
+ },
+ "171147": {
+  "classes": "BRD BST MNK RNG ROG WAR",
+  "name": "Club of Fiery Revelation",
+  "notrade": false
+ },
+ "171148": {
+  "classes": "BRD BST RNG ROG WAR",
+  "name": "Blue Claw",
+  "notrade": false
+ },
+ "171149": {
+  "classes": "BRD BST RNG ROG WAR",
+  "name": "Bloodthirsty Shank",
+  "notrade": false
+ },
+ "171150": {
+  "classes": "WAR",
+  "name": "Sword of Forgebound Pugnaciousness",
+  "notrade": false
+ },
+ "171151": {
+  "classes": "PAL SHD",
+  "name": "Corrupted Thirst",
+  "notrade": false
+ },
+ "171152": {
+  "classes": "BST MNK",
+  "name": "Reprisal",
+  "notrade": false
+ },
+ "171153": {
+  "classes": "BST MNK",
+  "name": "Cadence Cudgel",
+  "notrade": false
+ },
+ "171154": {
+  "classes": "ROG",
+  "name": "Sharp Hook",
+  "notrade": false
+ },
+ "171155": {
+  "classes": "CLR DRU SHM",
+  "name": "Mortie's Hammer",
+  "notrade": false
+ },
+ "171156": {
+  "classes": "ENC MAG NEC WIZ",
+  "name": "Ticktock's Ritual Blade of the Influencer",
+  "notrade": false
+ },
+ "171157": {
+  "classes": "BER PAL RNG SHD WAR",
+  "name": "Royal Slasher of Consumption",
+  "notrade": false
+ },
+ "171158": {
+  "classes": "BER BST MNK PAL RNG SHD WAR",
+  "name": "Mallet of Reprised Strength",
+  "notrade": false
+ },
+ "171159": {
+  "classes": "BER PAL RNG SHD WAR",
+  "name": "Ox Tongue of the Falls",
+  "notrade": false
+ },
+ "171160": {
+  "classes": "PAL SHD",
+  "name": "Willbreaker, the Dark Omen",
+  "notrade": false
+ },
+ "171161": {
+  "classes": "BST MNK",
+  "name": "Faktor, Destroyer of Spinal Columns",
+  "notrade": false
+ },
+ "171162": {
+  "classes": "CLR DRU SHM",
+  "name": "Avowed Relic of Holy Revelation",
+  "notrade": false
+ },
+ "171163": {
+  "classes": "ENC MAG NEC WIZ",
+  "name": "Laurie's Song",
+  "notrade": false
+ },
+ "171164": {
+  "classes": "RNG",
+  "name": "Wolyenie, Eloquent Elegy",
+  "notrade": false
+ },
+ "171165": {
+  "classes": "PAL ROG SHD WAR",
+  "name": "Bow of Fiery Revelation",
+  "notrade": false
+ },
+ "171166": {
+  "classes": "ALL",
+  "name": "Polished Sardonyx of Lunacy",
+  "notrade": true
+ },
+ "171167": {
+  "classes": "ALL",
+  "name": "Mischievous Reanimating Reagent",
+  "notrade": true
+ },
+ "171168": {
+  "classes": "ALL",
+  "name": "Tiny Tessellated Ootheca",
+  "notrade": true
+ },
+ "171169": {
+  "classes": "ALL",
+  "name": "Protective Beak Bauble",
+  "notrade": true
+ },
+ "171170": {
+  "classes": "ALL",
+  "name": "Emberquartz Gem of Havoc",
+  "notrade": true
+ },
+ "171171": {
+  "classes": "ALL",
+  "name": "Sharpened Steely Emberquartz",
+  "notrade": true
+ },
+ "171172": {
+  "classes": "ALL",
+  "name": "Equivalence of the Trepid Water",
+  "notrade": true
+ },
+ "171173": {
+  "classes": "ALL",
+  "name": "Delight",
+  "notrade": true
+ },
+ "171174": {
+  "classes": "ALL",
+  "name": "Rapidious Sun Shaving",
+  "notrade": true
+ },
+ "171175": {
+  "classes": "ALL",
+  "name": "Stately Seal of Takish`Hiz",
+  "notrade": true
+ },
+ "171176": {
+  "classes": "ALL",
+  "name": "Lazam's Tune",
+  "notrade": true
+ },
+ "171177": {
+  "classes": "ALL",
+  "name": "Tribute to the Fallen",
+  "notrade": true
+ },
+ "171178": {
+  "classes": "ALL",
+  "name": "Sagacious Moon Sliver",
+  "notrade": true
+ },
+ "171179": {
+  "classes": "ALL",
+  "name": "Steely Stone of Buckling",
+  "notrade": true
+ },
+ "171183": {
+  "classes": "ALL",
+  "name": "Emberquartz Protector Source",
+  "notrade": false
+ },
+ "171185": {
+  "classes": "ALL",
+  "name": "Emberquartz Wayfarer Source",
+  "notrade": false
+ },
+ "171187": {
+  "classes": "ALL",
+  "name": "Emberquartz Conjuror Source",
+  "notrade": false
+ },
+ "171189": {
+  "classes": "ALL",
+  "name": "Emberquartz Slayer Source",
+  "notrade": false
+ },
+ "171313": {
+  "classes": "BST MAG NEC",
+  "name": "Kharsk's Hoop of Companionship",
+  "notrade": true
+ },
+ "171314": {
+  "classes": "ALL",
+  "name": "Kveldulf's Stud of War",
+  "notrade": true
+ },
+ "171315": {
+  "classes": "ALL",
+  "name": "Hardened Brass Goblin Earring",
+  "notrade": true
+ },
+ "171316": {
+  "classes": "ALL",
+  "name": "White Gold Goblin Earring",
+  "notrade": true
+ },
+ "171317": {
+  "classes": "BRD PAL SHD WAR",
+  "name": "Mongrel's Muzzle",
+  "notrade": true
+ },
+ "171318": {
+  "classes": "ALL",
+  "name": "Fabulous Facade of Festivities",
+  "notrade": true
+ },
+ "171319": {
+  "classes": "ALL",
+  "name": "Rusty Claptrap",
+  "notrade": true
+ },
+ "171320": {
+  "classes": "ALL",
+  "name": "Compressed Stone Shard",
+  "notrade": true
+ },
+ "171321": {
+  "classes": "ALL",
+  "name": "Carapace Locket",
+  "notrade": true
+ },
+ "171322": {
+  "classes": "ALL",
+  "name": "Charka's Nimbleness",
+  "notrade": true
+ },
+ "171323": {
+  "classes": "ALL",
+  "name": "Blackened Shoulder Pads",
+  "notrade": true
+ },
+ "171324": {
+  "classes": "ALL",
+  "name": "Flea Infested Pauldrons",
+  "notrade": true
+ },
+ "171325": {
+  "classes": "ALL",
+  "name": "Mighty Mud Mantle",
+  "notrade": true
+ },
+ "171326": {
+  "classes": "ALL",
+  "name": "Basirt's Crimson Cape",
+  "notrade": true
+ },
+ "171327": {
+  "classes": "ALL",
+  "name": "Crimson Cloak of the Bloodmoon",
+  "notrade": true
+ },
+ "171328": {
+  "classes": "ALL",
+  "name": "Terrapin Scale Cloak",
+  "notrade": true
+ },
+ "171329": {
+  "classes": "ALL",
+  "name": "Emblazoned Goblet of Vitality",
+  "notrade": true
+ },
+ "171330": {
+  "classes": "ALL",
+  "name": "Guide to the Forge",
+  "notrade": true
+ },
+ "171331": {
+  "classes": "ALL",
+  "name": "Skraiw's Golden Skull Talisman",
+  "notrade": true
+ },
+ "171332": {
+  "classes": "ALL",
+  "name": "Hardened Brass Goblin Ring",
+  "notrade": true
+ },
+ "171333": {
+  "classes": "ALL",
+  "name": "Emonet's Signet of Dedication",
+  "notrade": true
+ },
+ "171334": {
+  "classes": "ALL",
+  "name": "Signet of Dalnavy",
+  "notrade": true
+ },
+ "171335": {
+  "classes": "ALL",
+  "name": "Stone-Fired Blackflame Belt",
+  "notrade": true
+ },
+ "171336": {
+  "classes": "ALL",
+  "name": "Comrade's Cincture of Calamity",
+  "notrade": true
+ },
+ "171337": {
+  "classes": "ALL",
+  "name": "Sash of Nokk Fury",
+  "notrade": true
+ },
+ "171338": {
+  "classes": "ALL",
+  "name": "The Sergeant's Keepsake",
+  "notrade": true
+ },
+ "171339": {
+  "classes": "ALL",
+  "name": "Tarantis Pedipalp",
+  "notrade": true
+ },
+ "171340": {
+  "classes": "ALL",
+  "name": "Grungy Bauble",
+  "notrade": true
+ },
+ "171341": {
+  "classes": "BRD PAL SHD WAR",
+  "name": "Wrought-Iron Rampart",
+  "notrade": true
+ },
+ "171342": {
+  "classes": "BRD BST MNK PAL RNG ROG SHD WAR",
+  "name": "Taloned Heater Shield",
+  "notrade": true
+ },
+ "171343": {
+  "classes": "CLR DRU ENC MAG NEC SHM WIZ",
+  "name": "Protection of Periwinkle",
+  "notrade": true
+ },
+ "171344": {
+  "classes": "BRD RNG ROG WAR",
+  "name": "Ze`lee's Folly",
+  "notrade": true
+ },
+ "171345": {
+  "classes": "BRD RNG ROG WAR",
+  "name": "Kele's Tail Cutter",
+  "notrade": true
+ },
+ "171346": {
+  "classes": "BRD BST MNK RNG ROG WAR",
+  "name": "Bug Squasher",
+  "notrade": true
+ },
+ "171347": {
+  "classes": "BRD BST MNK RNG ROG WAR",
+  "name": "Voosi's Crusher",
+  "notrade": true
+ },
+ "171348": {
+  "classes": "BRD BST RNG ROG WAR",
+  "name": "Dreamspiral",
+  "notrade": true
+ },
+ "171349": {
+  "classes": "BRD BST RNG ROG WAR",
+  "name": "Twisted Shank of the Quarry",
+  "notrade": true
+ },
+ "171350": {
+  "classes": "WAR",
+  "name": "Tilion's Sword of War",
+  "notrade": true
+ },
+ "171351": {
+  "classes": "PAL SHD",
+  "name": "Sliver of Victory",
+  "notrade": true
+ },
+ "171352": {
+  "classes": "BST MNK",
+  "name": "Sharpened Metallic Fingernails",
+  "notrade": true
+ },
+ "171353": {
+  "classes": "BST MNK",
+  "name": "Ceremonial Brawler of the Rebellion",
+  "notrade": true
+ },
+ "171354": {
+  "classes": "ROG",
+  "name": "Death Dealer",
+  "notrade": true
+ },
+ "171356": {
+  "classes": "CLR DRU SHM",
+  "name": "Kor's Ritual Scepter",
+  "notrade": true
+ },
+ "171357": {
+  "classes": "ENC MAG NEC WIZ",
+  "name": "Adorned Alloyed Dagger",
+  "notrade": true
+ },
+ "171358": {
+  "classes": "ENC MAG NEC WIZ",
+  "name": "Geomimus' Spare Wand",
+  "notrade": true
+ },
+ "171359": {
+  "classes": "BER PAL RNG SHD WAR",
+  "name": "Crushenda",
+  "notrade": true
+ },
+ "171360": {
+  "classes": "BER BST MNK PAL RNG SHD WAR",
+  "name": "Rod of the Firestarter",
+  "notrade": true
+ },
+ "171361": {
+  "classes": "BER PAL RNG SHD WAR",
+  "name": "Vision of Tenderstump",
+  "notrade": true
+ },
+ "171362": {
+  "classes": "PAL SHD",
+  "name": "Scourge Blade of Tarantis",
+  "notrade": true
+ },
+ "171363": {
+  "classes": "BST MNK",
+  "name": "Sorick's Staff of the Transcending Spirit",
+  "notrade": true
+ },
+ "171364": {
+  "classes": "CLR DRU SHM",
+  "name": "General Dotal's Chicken Crusher",
+  "notrade": true
+ },
+ "171365": {
+  "classes": "ENC MAG NEC WIZ",
+  "name": "Battlestaff of Virtue",
+  "notrade": true
+ },
+ "171366": {
+  "classes": "RNG",
+  "name": "Wyndrazer",
+  "notrade": true
+ },
+ "171367": {
+  "classes": "PAL ROG SHD WAR",
+  "name": "Feather Fury",
+  "notrade": true
+ },
+ "171368": {
+  "classes": "ALL",
+  "name": "The Captain's Strength",
+  "notrade": true
+ },
+ "171369": {
+  "classes": "ALL",
+  "name": "Violet Edged Rose",
+  "notrade": true
+ },
+ "171370": {
+  "classes": "ALL",
+  "name": "Concentrated Goblin Smarts",
+  "notrade": true
+ },
+ "171371": {
+  "classes": "ALL",
+  "name": "Hardened Glowing Diamond",
+  "notrade": true
+ },
+ "171372": {
+  "classes": "ALL",
+  "name": "Goliath's Amphibian Skin",
+  "notrade": true
+ },
+ "171373": {
+  "classes": "ALL",
+  "name": "Trinket of Fen's Return",
+  "notrade": true
+ },
+ "171374": {
+  "classes": "ALL",
+  "name": "Septagonal Sapphire",
+  "notrade": true
+ },
+ "171375": {
+  "classes": "ALL",
+  "name": "Candescent Heliotrope",
+  "notrade": true
+ },
+ "171376": {
+  "classes": "ALL",
+  "name": "Pieces of Shredded Wings",
+  "notrade": true
+ },
+ "171377": {
+  "classes": "ALL",
+  "name": "Ransomed Collection",
+  "notrade": true
+ },
+ "171378": {
+  "classes": "ALL",
+  "name": "Terracotta Torc",
+  "notrade": true
+ },
+ "171379": {
+  "classes": "ALL",
+  "name": "Rekindled Ember",
+  "notrade": true
+ },
+ "171380": {
+  "classes": "ALL",
+  "name": "Elisel's Gem of Virtue",
+  "notrade": true
+ },
+ "171771": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Wrist Armor",
+  "notrade": false
+ },
+ "171772": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Hands Armor",
+  "notrade": false
+ },
+ "171773": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Feet Armor",
+  "notrade": false
+ },
+ "171774": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Head Armor",
+  "notrade": false
+ },
+ "171775": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Arms Armor",
+  "notrade": false
+ },
+ "171776": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Legs Armor",
+  "notrade": false
+ },
+ "171777": {
+  "classes": "ALL",
+  "name": "Obscured Gallant Resonance Chest Armor",
+  "notrade": false
+ },
+ "171778": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Wrist Armor",
+  "notrade": true
+ },
+ "171779": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Hands Armor",
+  "notrade": true
+ },
+ "171780": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Feet Armor",
+  "notrade": true
+ },
+ "171781": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Head Armor",
+  "notrade": true
+ },
+ "171782": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Arms Armor",
+  "notrade": true
+ },
+ "171783": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Legs Armor",
+  "notrade": true
+ },
+ "171784": {
+  "classes": "ALL",
+  "name": "Obscured Steadfast Resolve Chest Armor",
+  "notrade": true
+ },
+ "171974": {
+  "classes": "ALL",
+  "name": "Noble Expedition Haversack",
+  "notrade": true
+ }
+}

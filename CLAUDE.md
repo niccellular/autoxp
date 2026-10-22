@@ -56,6 +56,13 @@ MacroQuest Lua leveling automation (`init.lua`, `zones.lua`). Private repo nicce
   `DanNet(peer).Observe('AutoXP')`); DanNet only sends changes, so a 5s heartbeat field marks a gone peer.
   A Lua TLO function must `return 'string', value` (type name + value) or it reads NULL. The DanNet TLO forgets
   its peer after one member: never reuse `local dn = mq.TLO.DanNet(peer)` for a second member.
+- Spawn search (`SpawnCount` / `NearestSpawn` strings) reads name words that are keywords or classes as filters
+  (`wizard`, `warrior`, `knight`, `named`, `group`...): `npc a spiritforged wizard` is not a name search. Named mode
+  searches a safe word of the name and compares `CleanName()` exactly in Lua. `mq.getFilteredSpawns` with a Lua
+  predicate cost ~300ms a pass in Laurion Inn (one call per spawn); a Lua script is time-sliced across frames, but
+  the ImGui callback isn't - nothing scan-sized in `draw()`.
+- EQ map files (`maps/*.txt`, map lines in eqresource comments) hold the in-game X/Y negated: `P x, y, z` is
+  `X = -x, Y = -y`. In-game +Y is north and +X is west.
 - Damage message formats (DPS): `You crush X for N points of damage. (Critical)`, `You hit X for N points of poison
   damage by Oka's Bite. (Critical Twincast)`, `X is burned by YOUR flames for N points of non-melee damage.`,
   `<PetName> bashes X for N points…`, swarm pets `<Me>\`s pet bashes…`, DoTs `X has taken N damage from <Spell> by

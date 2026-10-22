@@ -1,2 +1,3 @@
 *.bak*
 autoxp_log.txt
+named/*.err
