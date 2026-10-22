@@ -31,8 +31,16 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 
 ## What it does
 
-- **Modes:** Hunter (finds mobs in a level range and radius, in the zone it is in), Named (only the zone's named and
-  their placeholders), Assist, Chase, Manual.
+- **Modes:**
+  - **Hunter:** pulls mobs in a level range within the pull radius, in the zone it is in (see Pulling).
+  - **Named:** the tank hunts only the zone's named mobs and their placeholders, from eqresource.com's Named pages,
+    going invisible for walks past other NPCs while the group follows in Chase (see Named mode below; settings on the
+    Named tab).
+  - **Assist:** fights the group main assist's target (or the "Main assist" character's) once it is at or under
+    "Assist at %" (default 95) and has reached the tank; doesn't follow anyone.
+  - **Chase:** follows the group main tank (or the "Chase target" character) to within "Chase distance" (default 30),
+    and fights like Assist.
+  - **Manual:** pulls nothing; fights what is on it and what you target and attack (as Tank, your target is its pick).
 - **Role:** Tank (front, taunt, stun-lock, target priority, keeps mobs in front) or DPS (behind or at range).
   Duties are separate toggles: Heal, CC, Debuff, Nuke, DoT, Buff, Rez (e.g. a healer can opt out of nukes or DoTs).
   **Backup** (backup tank): while the group main tank is dead or out of the zone, this character tanks in its place
