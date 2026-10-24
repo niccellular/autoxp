@@ -28,7 +28,7 @@ local S = {
     mode = 'Hunter', role = 'Tank', heal = true, cc = false, debuff = true, nuke = true, dot = true, buff = true, rez = false, ccStuns = '',
     travelZone = '', travelGroup = true, travelReturn = false, lobbySummon = true, death = {},
     namedInvis = true, invisWith = '', ivuWith = '',
-    minlvl = 15, maxlvl = 25, radius = 1500,
+    minlvl = 15, maxlvl = 25, radius = 1500, anchor = false,
     assistName = '', assistAt = 95, chaseName = '', chaseDist = 30,
     restPct = 50, restTo = 90,
     selfHealPct = 50, groupHealPct = 40, tankHealPct = 75, emergencyPct = 20, healSpells = '',
@@ -727,12 +727,49 @@ local function scanAbilities()
     save()
 end
 local mapRadius = -1
+-- the Anchor button (Tank role): the pull circle dropped on a spot of a zone - Hunter pulls around it instead of around
+-- me, and the map shows it there (an MQ2Map maploc) instead of the SpellRadius circle that follows me. Set only by the
+-- button or /autoxp anchor; nil when there is none in this zone
+function FIGHT.anchor()
+    local a = S.anchor
+    if S.role ~= 'Tank' or type(a) ~= 'table' or a.zone ~= (mq.TLO.Zone.ShortName() or '') then return nil end
+    return a
+end
 local function updateMapRadius()
-    local want = (R.running and S.mode == 'Hunter') and S.radius or 0
+    local a = FIGHT.anchor()
+    local want = (R.running and S.mode == 'Hunter' and not a) and S.radius or 0
     if want ~= mapRadius then
         mq.cmdf('/mapfilter SpellRadius %d', want)
         mapRadius = want
     end
+    -- the anchor's maploc: placed, moved, resized or taken away as it changes (every 0.5s at most: the radius slider).
+    -- A change takes the old one away and places a new one: /maploc on a spot already there updates it in place, and
+    -- MQ2Map does that through a map object it doesn't check, gone after a map regenerate with the All filter off (a
+    -- crash). MQ2Map deletes every maploc on zoning; a reload places it again (the in-place update, once)
+    local zone, m = mq.TLO.Zone.ShortName() or '', R.anchorMap
+    if m and m.zone ~= zone then m = nil; R.anchorMap = nil end
+    local key = a and string.format('%d %d %d %d', a.y, a.x, a.z, S.radius) or nil
+    if key == (m and m.key) or mq.gettime() - (R.anchorMapAt or 0) < 500 then return end
+    R.anchorMapAt = mq.gettime()
+    if m then mq.cmdf('/maploc remove %d %d %d', m.y, m.x, m.z) end
+    if a then
+        mq.cmdf('/maploc size 10 width 2 color 255 255 0 radius %d rcolor 255 255 0 %d %d %d label AutoXP anchor', S.radius, a.y, a.x, a.z)
+        R.anchorMap = { zone = zone, x = a.x, y = a.y, z = a.z, key = key }
+    else
+        R.anchorMap = nil
+    end
+end
+-- the Anchor button / /autoxp anchor [on|off]: drop the pull circle where I stand, or lift it
+function FIGHT.setAnchor(on)
+    if on then
+        local function r(v) return math.floor((v or 0) + 0.5) end
+        S.anchor = { zone = mq.TLO.Zone.ShortName() or '', x = r(mq.TLO.Me.X()), y = r(mq.TLO.Me.Y()), z = r(mq.TLO.Me.Z()) }
+        log('anchored the pull circle at %d, %d in %s: Hunter pulls within %d of it', S.anchor.y, S.anchor.x, S.anchor.zone, S.radius)
+    else
+        S.anchor = false
+        log('anchor lifted: the pull circle follows me again')
+    end
+    updateMapRadius()
 end
 
 -- pull spell: longest-range single-target detrimental gem (stun > nuke > DoT > other); never mez, root or calm
@@ -2845,6 +2882,33 @@ function FIGHT.groupFar(r)
 end
 FIGHT.GROUPNEAR = 200
 
+-- a fight on the group: a live NPC on the extended target list (other than except) within 150 of me or of anyone in the
+-- group here. A walk to a pull and a trip both stop for it: Ramakrr walked on to a fire mephit lord while blood bats
+-- killed Lolelena behind him, then pulled it on top of them (2026-10-23 15:30)
+function FIGHT.groupAggro(except)
+    local at = { { mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0 } }
+    for i = 1, (mq.TLO.Group.Members() or 0) do
+        local m = mq.TLO.Group.Member(i)
+        local s = m.Name() and not m.OtherZone() and m.Present() and m.Type() ~= 'Corpse' and m.Spawn or nil
+        if s and s() and s.X() then at[#at + 1] = { s.X(), s.Y() or 0 } end
+    end
+    for i = 1, (mq.TLO.Me.XTarget() or 0) do
+        local x = mq.TLO.Me.XTarget(i)
+        local id = x() and x.ID() or 0
+        if id > 0 and id ~= except and x.Type() == 'NPC' then
+            local xx, xy = x.X() or 0, x.Y() or 0
+            for _, p in ipairs(at) do
+                local dx, dy = xx - p[1], xy - p[2]
+                if dx * dx + dy * dy < 22500 then
+                    local s = spawn(id)
+                    if alive(s) then return s end
+                    break
+                end
+            end
+        end
+    end
+end
+
 -- reasons not to pull yet: resurrection sickness (mine or a group member's), a dead or missing member, one not with me
 -- (over FIGHT.GROUPNEAR away), a healer or CC class under "Rest below %" mana
 local SICK = { 'Resurrection Sickness', 'Revival Sickness' }
@@ -2917,23 +2981,9 @@ local function corpseHold()
     if mq.gettime() - R.corpseHereAt < 180000 then return 'my corpse is waiting for a rez' end
 end
 
--- a fight on the way: an NPC on the extended target list within 150 of me or of the group's main tank (members ahead of
--- the tank stop with it). Ramakrr ran on for the zone line with mobs on the group (2026-10-21)
-local function aggro()
-    if #hostiles() > 0 then return true end
-    local mt = mq.TLO.Group.MainTank
-    local s = mt() and not mt.OtherZone() and mt.Spawn or nil
-    if not s or not s() or s.Type() == 'Corpse' or s.ID() == myId() then return false end
-    local mx, my = s.X() or 0, s.Y() or 0
-    for i = 1, (mq.TLO.Me.XTarget() or 0) do
-        local x = mq.TLO.Me.XTarget(i)
-        if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' then
-            local dx, dy = (x.X() or 0) - mx, (x.Y() or 0) - my
-            if dx * dx + dy * dy < 22500 and alive(spawn(x.ID())) then return true end
-        end
-    end
-    return false
-end
+-- a fight on the way: an NPC on the extended target list within 150 of me or of anyone in the group here (the whole
+-- group stops with it, a member left behind too). Ramakrr ran on for the zone line with mobs on the group (2026-10-21)
+local function aggro() return FIGHT.groupAggro() ~= nil end
 
 local function held()
     local hold = (aggro() or R.state == 'FIGHT' or R.state == 'APPROACH' or R.pickId ~= 0) and 'a fight' or pullHold(true)
@@ -3241,6 +3291,14 @@ local function pickTarget()
         if mq.gettime() - R.lastHunt < 1500 then return nil end
         R.lastHunt = mq.gettime()
         local q = string.format('npc range %d %d radius %d noalert 1 targetable', S.minlvl, S.maxlvl, S.radius)
+        -- anchored: the circle around the anchor instead (a z of 0 would make the spawn search read my own), and the walk
+        -- to a pull may be as long as the way to the anchor plus the radius
+        local a, reach = FIGHT.anchor(), S.radius
+        if a then
+            q = string.format('npc range %d %d loc %d %d %.1f radius %d noalert 1 targetable', S.minlvl, S.maxlvl, a.x, a.y,
+                a.z ~= 0 and a.z or 0.1, S.radius)
+            reach = S.radius + math.floor(math.sqrt(((mq.TLO.Me.X() or 0) - a.x) ^ 2 + ((mq.TLO.Me.Y() or 0) - a.y) ^ 2))
+        end
         -- every mob in level range within the pull radius, by walking distance (NearestSpawn is 2D, so check the
         -- path), ranked by the fewest other NPCs within avoidRadius of it (alone first), then the closest. The first
         -- whose route passes no other mob is pulled; with none clear, no pull (mobs wander and respawn: look again)
@@ -3253,7 +3311,7 @@ local function pickTarget()
             if (R.skip[id] or 0) < mq.gettime() and not npcs[(s.CleanName() or ''):lower()] then
                 local len = mq.TLO.Navigation.PathLength('id ' .. id)() or -1
                 if len < 0 then R.skip[id] = mq.gettime() + 30000                     -- off the navmesh
-                elseif len <= S.radius then
+                elseif len <= reach then
                     -- (the mob itself can miss the count: "-1 other(s)")
                     local near = math.max(0, (mq.TLO.SpawnCount(string.format('npc loc %.0f %.0f %.0f radius %d zradius 40',
                         s.X(), s.Y(), s.Z(), S.avoidRadius))() or 1) - 1)
@@ -3263,12 +3321,14 @@ local function pickTarget()
             end
         end
         if #cands == 0 then
-            if mq.gettime() - R.noRouteAt > 30000 then log('no mobs to pull within %d', S.radius); R.noRouteAt = mq.gettime() end
+            if mq.gettime() - R.noRouteAt > 30000 then
+                log('no mobs to pull within %d%s', S.radius, a and ' of the anchor' or ''); R.noRouteAt = mq.gettime()
+            end
             return nil
         end
         table.sort(cands, function(a, b) return a.key < b.key end)
         -- every NPC a route could pass (the route stays within the pull radius of me), grey ones and Find Window NPCs aside
-        local mobs, rq = {}, string.format('npc radius %d', S.radius + S.avoidRadius)
+        local mobs, rq = {}, string.format('npc radius %d', reach + S.avoidRadius)
         for i = 1, math.min(mq.TLO.SpawnCount(rq)() or 0, 100) do
             local m = mq.TLO.NearestSpawn(i, rq)
             if not m() then break end
@@ -3463,6 +3523,49 @@ function FIGHT.backSpot(t)
             if len >= 0 and len < ARCHERY * 2.5 then return { x = x, y = y, z = tz, deg = math.abs(deg) } end
         end
     end
+end
+
+-- a pull spot: the first NPC other than t within the alone radius of x, y, z (same level) - one already on the extended
+-- target list, a grey one or a Find Window NPC doesn't count. Pulling from there would bring it along
+function FIGHT.nextTo(t, x, y, z)
+    local listed, npcs = {}, findable()
+    for i = 1, (mq.TLO.Me.XTarget() or 0) do listed[mq.TLO.Me.XTarget(i).ID() or 0] = true end
+    local q = string.format('npc targetable loc %.0f %.0f %.0f radius %d zradius 40', x, y, z, S.avoidRadius)
+    for i = 1, math.min(mq.TLO.SpawnCount(q)() or 0, 20) do
+        local s = mq.TLO.NearestSpawn(i, q)
+        if not s() then break end
+        if s.ID() ~= t.ID() and not listed[s.ID() or 0] and s.ConColor() ~= 'GREY' and not npcs[(s.CleanName() or ''):lower()] then
+            return s.CleanName() or '?'
+        end
+    end
+end
+
+-- a clear spot to pull t from: around it at the pull distance, then farther out (x1.5, x2, within 80% of the pull's
+-- range), 30 degrees at a time either way from where I stand (up to 120), with no NPC next to it (FIGHT.nextTo) and t
+-- in sight - the shortest walk of those (under 2.5x its distance)
+function FIGHT.pullSpot(t, p)
+    local tx, ty, tz = t.X() or 0, t.Y() or 0, t.Z() or 0
+    local base = math.atan2((mq.TLO.Me.Y() or ty) - ty, (mq.TLO.Me.X() or tx) - tx)
+    local rings = { p.dist }
+    for _, f in ipairs({ 1.5, 2 }) do
+        local d = math.min(p.dist * f, p.range * 0.8)
+        if d > rings[#rings] + 10 then rings[#rings + 1] = d end
+    end
+    local best
+    for _, d in ipairs(rings) do
+        for _, deg in ipairs({ 0, 30, -30, 60, -60, 90, -90, 120, -120 }) do
+            local a = base + math.rad(deg)
+            local x, y = tx + math.cos(a) * d, ty + math.sin(a) * d
+            if not FIGHT.nextTo(t, x, y, tz)
+                and mq.TLO.LineOfSight(string.format('%.1f,%.1f,%.1f:%.1f,%.1f,%.1f', y, x, tz, ty, tx, tz))() then
+                local len = mq.TLO.Navigation.PathLength(string.format('locxyz %.1f %.1f %.1f', x, y, tz))() or -1
+                if len >= 0 and len < d * 2.5 and (not best or len < best.len) then
+                    best = { x = x, y = y, z = tz, d = d, deg = math.abs(deg), len = len }
+                end
+            end
+        end
+    end
+    return best
 end
 
 -- a melee DPS that casts (not the tank, not a bard) still walking behind its target (MoveUtils stick behind): up to 4s
@@ -3695,6 +3798,17 @@ local function step()
     elseif st == 'APPROACH' then
         local t = spawn(R.targetId)
         if not alive(t) then setState('FIND'); return end
+        -- a walk to a pull (nothing was on us): a fight that starts on the group meanwhile comes first - the pull is
+        -- dropped and FIND goes for the mob on the extended target list
+        if R.pullCandidate then
+            local a = FIGHT.groupAggro(t.ID())
+            if a then
+                log('%s is on the group - leaving %s for now', a.CleanName() or '?', R.targetName)
+                mq.cmd('/nav stop')
+                R.waypoint, R.pull, R.groupWait, R.targetId, R.pickId = nil, nil, nil, 0, 0
+                setState('FIND'); return
+            end
+        end
         if R.waypoint then
             -- detour leg: then head for the target (or straight there if something already aggroed)
             local w = R.waypoint
@@ -3720,6 +3834,33 @@ local function step()
                 return
             elseif R.groupWait then
                 R.groupWait = nil; log('group caught up - pulling %s', R.targetName)
+            end
+        end
+        -- the spot I pull from (the fight comes there, and the cast drops invisibility): another NPC within the alone
+        -- radius of it would come too - walk to the nearest clear spot around the mob (FIGHT.pullSpot) and pull from
+        -- there (20s at most); with none clear, pull from here. Looked at once per pull
+        if R.pull and R.pull.spot then
+            local p = R.pull.spot
+            if math.sqrt(((mq.TLO.Me.X() or 0) - p.x) ^ 2 + ((mq.TLO.Me.Y() or 0) - p.y) ^ 2) > 8 and mq.gettime() - p.at < 20000 then
+                if not mq.TLO.Navigation.Active() and mq.gettime() - R.lastNav > 1000 then
+                    mq.cmdf('/nav locxyz %.1f %.1f %.1f', p.x, p.y, p.z); R.lastNav = mq.gettime()
+                end
+                return
+            end
+            R.pull.spot = nil
+        elseif R.pull and not R.pull.spotChecked and reachable(t, R.pull.dist, true) then
+            R.pull.spotChecked = true
+            local who = FIGHT.nextTo(t, mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0, mq.TLO.Me.Z() or 0)
+            if who then
+                local p = FIGHT.pullSpot(t, R.pull)
+                if p then
+                    log('%s is next to my pull spot - pulling %s from a clear one (%d off it, %d degrees around)', who, R.targetName, p.d, p.deg)
+                    mq.cmdf('/nav locxyz %.1f %.1f %.1f', p.x, p.y, p.z)
+                    R.lastNav, p.at = mq.gettime(), mq.gettime()
+                    R.pull.spot, R.pull.dist = p, math.max(R.pull.dist, p.d + 10)
+                    return
+                end
+                log('%s is next to my pull spot and no spot around %s is clear - pulling from here', who, R.targetName)
             end
         end
         if R.pull and reachable(t, R.pull.dist, true) then
@@ -4365,6 +4506,15 @@ function draw()
         ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); flow(70); roleButton('DPS')
         flow(70)
         toggle('Backup', 'backupTank', 'Backup tank: while the group main tank is dead or out of the zone, tank in its place\n(Tank role: taunt, Tank abilities, mobs in front, target priority); back to DPS once it is alive\nand nothing is on the extended target list.')
+        if S.role == 'Tank' then
+            flow(70)
+            local an = FIGHT.anchor()
+            local c = an and ON or OFF
+            ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
+            if ImGui.Button('Anchor', 70, 26) then FIGHT.setAnchor(not an) end
+            ImGui.PopStyleColor()
+            tip('Anchor: drop the pull circle where I stand. Hunter pulls only mobs within the pull radius of that spot,\nand the map circle stays there instead of following me. Kept for this zone until clicked again.')
+        end
         ImGui.Text('Duties:'); ImGui.SameLine()
         toggle('Heal', 'heal', 'Heal: heal yourself / group members below the Healing thresholds,\nand use Emergency abilities (Lay on Hands) below the emergency threshold.')
         flow(70)
@@ -4701,6 +4851,9 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif cmd == 'named' and FIGHT.named then FIGHT.named.command(a1)
     elseif cmd == 'group' then S.showPeers = not S.showPeers
     elseif cmd == 'hud' then S.showHud = not S.showHud
+    elseif cmd == 'anchor' then
+        if S.role ~= 'Tank' then log('anchor: Tank role only')
+        else FIGHT.setAnchor(a1 == 'on' or (a1 == nil and not FIGHT.anchor())) end
     elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
     elseif cmd == 'set' and a1 and a2 and S[a1] ~= nil and type(S[a1]) ~= 'table' then
         -- /autoxp set <setting> <value>: any plain setting, e.g. groupHealPct 65
@@ -4711,7 +4864,7 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
 
 startSpellScan()
 if args[1] then TRIP.go(args[1]) end
@@ -4732,6 +4885,7 @@ while not R.terminate do
     if mq.gettime() - (R.savedAt or 0) > 15000 then R.savedAt = mq.gettime(); pcall(save) end
     local pok, perr = pcall(peersTick)
     if not pok and perr ~= R.peerErr then R.peerErr = perr; log('group view error: %s', tostring(perr)) end
+    pcall(updateMapRadius)   -- the window's callback does it too, but not while it's collapsed (/autoxp set radius)
     -- the Named tab's Look now: a pass of spawn searches, not in the window's callback (it can't wait)
     if FIGHT.named and FIGHT.named.wantLook then FIGHT.named.wantLook = false; pcall(FIGHT.named.scan) end
     -- a trip with AutoXP stopped (Travel tab, /autoxp travel); a running AutoXP travels from step()
@@ -4747,5 +4901,6 @@ while not R.terminate do
     mq.delay(50)
 end
 stopAll('window closed')
+if R.anchorMap then mq.cmdf('/maploc remove %d %d %d', R.anchorMap.y, R.anchorMap.x, R.anchorMap.z) end
 save()
 if logf then logf:close() end

@@ -15,6 +15,7 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp group          (show / hide the AutoXP Group window)
 /autoxp hud            (show / hide the HUD)
 /autoxp backup [on|off]          (backup tank)
+/autoxp anchor [on|off]          (Tank: the pull circle stays where I stand now)
 /autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
 /autoxp travel [zone]            (travel there, the whole group with "Whole group" on)
 /autoxp travel stop
@@ -61,7 +62,7 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Travel** (Travel tab, `/autoxp travel <zone>`): EasyFind to a zone, in any mode, AutoXP started or not. A trip
   leaves once nothing holds it back: no fight, HP and mana above "Rest below %", no resurrection sickness, nobody in
   the group dead or low, no corpse here waiting for a rez. On the way it heals, mezzes and defends; a mob on the
-  extended target list within 150 of it or of the main tank stops the trip to fight it, and it sets off again once
+  extended target list within 150 of it or of anyone in the group here stops the trip to fight it, and it sets off again once
   nothing holds it back. The Hunter doesn't pull while a trip waits. **Whole group** sends Travel and Stop to every group member (DanNet `/dggexecute`);
   each leaves once its own holds clear, and the Hunter pulls only once everyone is in the zone. **Return after death**
   (off by default): alive again in another zone after a death (a respawn at the bind point), travel back to the zone
@@ -73,6 +74,12 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Pulling:** pull spell, ranged item or Pull ability from a safe distance, then holds while the mob comes. The tank
   never pulls alone: no pull while a group member here is over 200 away (the hold says when the group main tank is
   someone else - Chase follows the main tank), and near the target it waits up to 60s for the group to catch up.
+  Where it stops to pull, no other NPC may be within the alone radius (grey ones, Find Window NPCs and mobs already
+  fighting the group aside): with one there it walks to the nearest clear spot around the mob (at the pull distance or
+  farther out, within the pull's range; up to 120 degrees around either way, in sight of it) and pulls from there,
+  and with none clear it pulls from where it stands.
+  A fight that starts on the group during the walk (a mob on the extended target list within 150 of anyone in the
+  group) comes first: the tank drops the pull and goes for that mob.
   Hunter picks the mob with the fewest other NPCs within the alone radius (default 100), then the closest by
   walking distance, but only one whose walking route passes no other mob within the alone radius (grey ones and Find
   Window NPCs aside): a route past other mobs drags them along. With no clear route it waits and looks again (the log
@@ -80,6 +87,10 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   ENC, BRD, MAG, WIZ, NEC) is under it in mana (a bard: under 20%), a groupmate is casting its buffs (up to 60s each; a bard's songs
   don't count) or a groupmate is walking to or resurrecting a corpse (up to 3 minutes each).
   NPCs listed in the zone's Find Window (quest givers, merchants, bankers) are never hunted.
+  **Anchor** (Tank role, next to Backup): the pull circle normally moves with the tank. Clicking Anchor drops it where
+  the tank stands: Hunter then pulls only mobs within the pull radius of that spot, and the map circle (an MQ2Map
+  maploc) stays there. It is set only by the button (or `/autoxp anchor`), kept for that zone across reloads, and
+  lifted by clicking it again.
 - **Named mode** (Named tab): the tank hunts only the zone's named mobs and their placeholders; the group follows in
   Chase. The zone's named, placeholders, the map points players posted in the page comments and every named drop
   (tradeable, or the classes that can use a No Trade one) come from eqresource.com's Named pages, kept in
