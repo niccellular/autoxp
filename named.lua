@@ -136,6 +136,16 @@ local function atSpot(t)
     return not posted
 end
 
+-- on the zone's ignore list (init.lua): the name itself, or a placeholder whose named are all ignored (no reason left
+-- to kill it)
+local function ignored(t)
+    if not X.ignored then return false end
+    if X.ignored(t.name) then return true end
+    if t.kind ~= 'ph' then return false end
+    for _, n in ipairs(t.of) do if not X.ignored(n.name) then return false end end
+    return true
+end
+
 -- the live named and placeholders (whole zone) in route order: a named first (the closest), then clockwise from my
 -- clock position (one within 150 of me counts as where I stand)
 function N.scan()
@@ -157,7 +167,7 @@ function N.scan()
                 got[id] = true
                 if (R.skip[id] or 0) < now and ((s.PctHPs() or 100) >= 100 or xt[id]) then
                     local t = { id = id, name = s.CleanName() or '?', kind = e.kind, of = e.named, y = s.Y() or 0, x = s.X() or 0, z = s.Z() or 0 }
-                    if t.kind == 'named' or atSpot(t) then out[#out + 1] = t end
+                    if (t.kind == 'named' or atSpot(t)) and not ignored(t) then out[#out + 1] = t end
                 end
             end
         end
@@ -258,7 +268,7 @@ function N.pick()
         return nil
     end
     local now, g = mq.gettime(), N.goal
-    if g and (not X.alive(mq.TLO.Spawn('id ' .. g.t.id)) or now - g.at > 90000) then N.goal, g = nil, nil end
+    if g and (not X.alive(mq.TLO.Spawn('id ' .. g.t.id)) or now - g.at > 90000 or ignored(g.t)) then N.goal, g = nil, nil end
     if not g then
         if now - (N.scanAt or 0) < 3000 then return nil end
         N.scanAt = now
@@ -365,6 +375,7 @@ function N.draw()
     ImGui.SetNextItemWidth(160)
     S.ivuWith = ImGui.InputText('IVU with', S.ivuWith)
     tip('My AAs for invisibility versus undead, ids or names. Empty: Group Perfected Invisibility to Undead, if I have it.')
+    if X.ignoreUI then X.ignoreUI() end
     if N.status ~= '' then ImGui.TextColored(1, 0.8, 0.3, 1, N.status) end
     if not D then return end
     ImGui.Separator()
@@ -384,8 +395,9 @@ function N.draw()
         for _, n in ipairs(D.named or {}) do
             local ph = 0
             for _, p in ipairs(n.ph or {}) do ph = ph + (N.kills[p:lower()] or 0) end
-            ImGui.Text(string.format('%s  (ph: %s)%s - killed %d, placeholders %d', n.name, table.concat(n.ph or {}, ', '),
-                spotsOf[n.name:lower()] and ', map points' or '', N.kills[n.name:lower()] or 0, ph))
+            ImGui.Text(string.format('%s  (ph: %s)%s - killed %d, placeholders %d%s', n.name, table.concat(n.ph or {}, ', '),
+                spotsOf[n.name:lower()] and ', map points' or '', N.kills[n.name:lower()] or 0, ph,
+                X.ignored and X.ignored(n.name) and ' - ignored' or ''))
         end
         ImGui.TreePop()
     end

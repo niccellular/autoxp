@@ -28,7 +28,7 @@ local S = {
     mode = 'Hunter', role = 'Tank', heal = true, cc = false, debuff = true, nuke = true, dot = true, buff = true, rez = false, ccStuns = '',
     travelZone = '', travelGroup = true, travelReturn = false, lobbySummon = true, death = {},
     namedInvis = true, invisWith = '', ivuWith = '',
-    minlvl = 15, maxlvl = 25, radius = 1500, anchor = false,
+    minlvl = 15, maxlvl = 25, radius = 1500, anchor = false, ignore = {},   -- ignore: { [zone] = 'name, name' }
     assistName = '', assistAt = 95, chaseName = '', chaseDist = 30,
     restPct = 50, restTo = 90,
     selfHealPct = 50, groupHealPct = 40, tankHealPct = 75, emergencyPct = 20, healSpells = '',
@@ -126,6 +126,47 @@ local function list(str)
         if b ~= '' then table.insert(out, b) end
     end
     return out
+end
+
+-- the zone's ignore list (S.ignore[zone]: names, any case): never pulled, attacked, assisted on or waited for - not even
+-- on the extended target list, where an ignored mob holds no pulls, rests or trips. Laurion Inn's sharks fly up out of
+-- reach once aggroed and stayed on the list for good (2026-10-26)
+function FIGHT.ignoreSet()
+    local z = mq.TLO.Zone.ShortName() or ''
+    local key = z .. '|' .. (S.ignore[z] or '')
+    if FIGHT.ignoreKey ~= key then
+        FIGHT.ignoreKey, FIGHT.ignoreNames = key, {}
+        for _, n in ipairs(list(S.ignore[z])) do FIGHT.ignoreNames[n:lower()] = true end
+    end
+    return FIGHT.ignoreNames
+end
+function FIGHT.ignoredName(name) return name ~= nil and name ~= '' and FIGHT.ignoreSet()[name:lower()] == true end
+function FIGHT.ignored(s) return FIGHT.ignoredName(s.CleanName()) end
+
+-- this zone's ignore list set here: passed on to the group (DanNet; each AutoXP keeps its own copy) unless it came
+-- from the group
+function FIGHT.setIgnore(str, zone, fromGroup)
+    zone = zone or mq.TLO.Zone.ShortName() or ''
+    str = table.concat(list(str), ', ')
+    if (S.ignore[zone] or '') == str then return end
+    S.ignore[zone] = str ~= '' and str or nil
+    log('ignore list in %s: %s%s', zone, str ~= '' and str or 'empty', fromGroup and ' (from the group)' or '')
+    if not fromGroup and (mq.TLO.Group.Members() or 0) > 0 and mq.TLO.Plugin('mq2dannet').IsLoaded() then
+        mq.cmdf('/dggexecute /autoxp ignoreset %s %s', zone, str)
+    end
+end
+function FIGHT.ignoreAdd(name)
+    name = (name or ''):gsub('^"(.*)"$', '%1')
+    if name == '' then return end
+    if FIGHT.ignoredName(name) then log('%s is already on the ignore list', name); return end
+    FIGHT.setIgnore((S.ignore[mq.TLO.Zone.ShortName() or ''] or '') .. ', ' .. name)
+end
+function FIGHT.ignoreRemove(name)
+    name = (name or ''):gsub('^"(.*)"$', '%1'):lower()
+    local had, out = list(S.ignore[mq.TLO.Zone.ShortName() or '']), {}
+    for _, n in ipairs(had) do if n:lower() ~= name then out[#out + 1] = n end end
+    if #out == #had then log('%s is not on the ignore list', name); return end
+    FIGHT.setIgnore(table.concat(out, ', '))
 end
 
 -- targeting / attack ----------------------------------------------------------------------
@@ -422,12 +463,23 @@ local function useAbility(a, id, why)
     return true
 end
 
--- feign death (SPA 74) drops aggro: never part of a rotation, only used by doShed
+-- feign death (SPA 74), or one that only lowers my hate (SPA 92 / 455 below 0, no damage, no memory blur: Arcane
+-- Whisper), drops aggro: never part of a rotation, only used by doShed. A Jolting kick that still hits keeps its role
 local fdCache = {}
 local function dropsAggro(a)
     if fdCache[a.name] == nil then
         local sp = a.kind == 'aa' and mq.TLO.Me.AltAbility(a.name).Spell or mq.TLO.Spell(a.name)
-        fdCache[a.name] = a.name:lower():find('feign') ~= nil or (sp() and sp.HasSPA(74)() == true) or false
+        local v = a.name:lower():find('feign') ~= nil or (sp() and sp.HasSPA(74)() == true) or false
+        if not v and sp() and not sp.HasSPA(63)() then
+            local low, dmg = false, false
+            for i = 1, (sp.NumEffects() or 0) do
+                local at, b = sp.Attrib(i)(), sp.Base(i)() or 0
+                if (at == 92 or at == 455) and b < 0 then low = true end
+                if at == 0 and b < 0 then dmg = true end
+            end
+            v = low and not dmg
+        end
+        fdCache[a.name] = v
     end
     return fdCache[a.name]
 end
@@ -475,6 +527,30 @@ local function spellFx(sp)
     end
     return fx, dur, tt
 end
+
+-- a spell that moves me (SPA 379, a directional teleport) itself or through what it triggers or procs, 3 deep:
+-- Dimensional Shield -> Dimensional Instability (a proc when hit) -> Dimensional Jolt -> Dimensional Shift, 24 feet
+-- backwards. Zenban, tanking, jumped back into more mobs on every hit and died (2026-10-24)
+function FIGHT.movesMe(sp, depth)
+    depth = depth or 0
+    if not sp or not sp() or depth > 3 then return false end
+    for i = 1, (sp.NumEffects() or 0) do
+        local at = sp.Attrib(i)()
+        if at == 379 then return true end
+        local nxt
+        if at == 374 or at == 470 or at == 340 then nxt = sp.Trigger(i)
+        elseif at == 323 or at == 85 or at == 419 then
+            local b = sp.Base(i)() or 0
+            nxt = b > 0 and mq.TLO.Spell(b) or nil
+        end
+        if nxt and nxt() and nxt.ID() ~= sp.ID() and FIGHT.movesMe(nxt, depth + 1) then return true end
+    end
+    local ac = sp.Trigger(0)   -- its autocast
+    return ac() ~= nil and ac.ID() ~= sp.ID() and FIGHT.movesMe(ac, depth + 1)
+end
+
+-- a discipline's line: its name without the rank (Kanghammer's Carapace Rk. II -> Kanghammer's Carapace)
+function FIGHT.rankless(n) return (n:gsub(' Rk%. [IVX]+$', '')) end
 
 -- effects that make an ability offensive (only counted when positive)
 local OFFENSE = { [2] = true, [85] = true, [119] = true, [169] = true, [171] = true, [177] = true, [178] = true, [184] = true,
@@ -531,6 +607,12 @@ local function classify(name, kind)
     if fx[74] then return 'Off' end                                   -- feign death: only to shed aggro (doShed)
     if fx[63] then return 'Off' end                                   -- memory blur (Silent Displacement): the tank's hate goes too
     if fx[26] or fx[83] or fx[88] or fx[104] or fx[145] then return 'Off' end   -- gate / teleport / evac: never automatic
+    if FIGHT.movesMe(sp) then return 'Off' end                        -- moves me (Dimensional Shield): never automatic
+    -- only lowers my hate (Arcane Whisper, filed as Tank by "hatred" in its description): doShed uses it
+    if ((fx[92] or 0) < 0 or (fx[455] or 0) < 0) and not off and (fx[0] or 0) >= 0 then return 'Off' end
+    -- makes the mobs forget everyone, like a memory blur (Companion of Necessity: its projection first takes the attention
+    -- of every mob around it - filed as Tank by "attention"): never automatic
+    if (sp.Description() or ''):lower():find('forget') then return 'Off' end
     do   -- gives mana (Elemental Conversion, Cannibalization): used when mana runs low, keeping HP back for one that costs it
         local d = (sp.Description() or ''):lower()
         if kind ~= 'disc' and not off and d:find('mana') and (d:find('restore') or d:find('return')) then return 'Mana' end
@@ -624,7 +706,7 @@ local ABILUSE = {
     Pet = 'In fights: heal (Mend Companion) under 30% pet HP; guard (Companion\'s Aegis, Host in the Shell) once the pet\nis under 80% HP and the guard isn\'t on it.',
 }
 
-local ABILVER = 14   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
+local ABILVER = 15   -- bump when classify() changes: abilities are rescanned once (roles you set yourself stay)
 local function scanAbilities()
     local found, seen, oldPos = {}, {}, {}
     for i, old in ipairs(S.abilities) do oldPos[old.name] = i end
@@ -633,11 +715,17 @@ local function scanAbilities()
             seen[name] = true
             local role, tier = classify(name, kind)
             local enabled, userRole, prev = true, false, nil
+            -- the saved entry: this name, else (a disc) an older rank of its line, whose settings it takes over
+            local same
             for _, old in ipairs(S.abilities) do
-                if old.name == name then
-                    enabled, prev = old.enabled ~= false, old
-                    if old.userRole then role, tier, userRole = old.role, old.tier or tier, true end
-                end
+                if old.name == name then same = old end
+                if not same and not prev and kind == 'disc' and old.kind == 'disc' and FIGHT.rankless(old.name) == FIGHT.rankless(name) then prev = old end
+            end
+            prev = same or prev
+            if prev then
+                enabled = prev.enabled ~= false
+                if prev.userRole then role, tier, userRole = prev.role, prev.tier or tier, true end
+                oldPos[name] = oldPos[name] or oldPos[prev.name]
             end
             local sp = abilitySpell({ name = name, kind = kind })
             local lvl = sp and sp() and (sp.Level() or 0) or 0
@@ -725,6 +813,34 @@ local function scanAbilities()
         if a.role ~= 'Off' then log('  %s %-28s -> %s%s', a.kind, a.name, a.role, a.tier and (' (' .. a.tier .. ')') or '') end
     end
     save()
+end
+
+-- a new rank of a discipline replaces the old one in the Combat Abilities window: the saved entry takes its name, keeping
+-- its role, place and settings (looked at every minute out of fights). Ramakrr's Kanghammer's Carapace never fired after
+-- Rk. II was scribed, and Deflection Discipline stopped the Rk. II as a disc that wasn't his (2026-10-24)
+function FIGHT.rankCheck()
+    if mq.gettime() - (R.rankAt or 0) < 60000 or #S.abilities == 0 then return end
+    for i = 1, (mq.TLO.Me.XTarget() or 0) do
+        if mq.TLO.Me.XTarget(i).Type() == 'NPC' and not FIGHT.ignored(mq.TLO.Me.XTarget(i)) then return end   -- not in a fight
+    end
+    R.rankAt = mq.gettime()
+    local have, line = {}, {}
+    for i = 1, 300 do
+        local c = mq.TLO.Me.CombatAbility(i)()
+        if type(c) == 'string' and c ~= '' then have[c] = true; line[FIGHT.rankless(c)] = c end
+    end
+    if next(have) == nil then return end
+    local known, n = {}, 0
+    for _, a in ipairs(S.abilities) do if a.kind == 'disc' then known[a.name] = true end end
+    for _, a in ipairs(S.abilities) do
+        local new = a.kind == 'disc' and not have[a.name] and line[FIGHT.rankless(a.name)] or nil
+        if new and not known[new] then
+            local sp = mq.TLO.Spell(new)
+            log('%s is now %s - it keeps its role (%s)', a.name, new, a.role)
+            known[new], a.name, a.id, n = true, new, sp() and sp.ID() or a.id, n + 1
+        end
+    end
+    if n > 0 then save() end
 end
 local mapRadius = -1
 -- the Anchor button (Tank role): the pull circle dropped on a spot of a zone - Hunter pulls around it instead of around
@@ -1117,7 +1233,7 @@ local function hostiles()
     local out = {}
     for i = 1, (mq.TLO.Me.XTarget() or 0) do
         local x = mq.TLO.Me.XTarget(i)
-        if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' and (x.Distance() or 999) < 150 then
+        if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' and (x.Distance() or 999) < 150 and not FIGHT.ignored(x) then
             local s = mq.TLO.Spawn('id ' .. x.ID())
             if alive(s) then table.insert(out, s) end
         end
@@ -1560,7 +1676,7 @@ end
 local function topAggro()
     if (mq.TLO.Me.PctAggro() or 0) >= 100 then return true end
     for i = 1, (mq.TLO.Me.XTarget() or 0) do
-        if (mq.TLO.Me.XTarget(i).PctAggro() or 0) >= 100 then return true end
+        if (mq.TLO.Me.XTarget(i).PctAggro() or 0) >= 100 and not FIGHT.ignored(mq.TLO.Me.XTarget(i)) then return true end
     end
     return false
 end
@@ -1700,7 +1816,7 @@ function FIGHT.keepInvis()
     if R.state == 'FIGHT' or R.state == 'APPROACH' then return false end
     for i = 1, (me.XTarget() or 0) do
         local x = me.XTarget(i)
-        if (x.ID() or 0) > 0 and x.Type() == 'NPC' then return false end
+        if (x.ID() or 0) > 0 and x.Type() == 'NPC' and not FIGHT.ignored(x) then return false end
     end
     if not R.invisNote then R.invisNote = true; log('invisible - no casts, abilities or songs until a fight') end
     return true
@@ -2405,6 +2521,12 @@ function FIGHT.chaseLoot()
 end
 end
 
+-- advanced looting turned off (all six at 17:42 from "/use item amulet": /use is short for /useadvlooting) leaves the
+-- Advanced Loot window empty, and chase loot with it
+mq.event('axpAdvLootOff', 'You are no longer using the Advanced Looting System.', function()
+    if S.chaseLoot then log('advanced looting is off - chase loot needs it: /useadvlooting turns it back on') end
+end)
+
 -- pet classes: summon the best pet in the book (mages: water first) and keep the best pet buff of each line
 -- on it (haste, misc, block: 10 min+). A gem is borrowed for any that isn't memorized
 local petBook, doPetCare
@@ -2895,7 +3017,7 @@ function FIGHT.groupAggro(except)
     for i = 1, (mq.TLO.Me.XTarget() or 0) do
         local x = mq.TLO.Me.XTarget(i)
         local id = x() and x.ID() or 0
-        if id > 0 and id ~= except and x.Type() == 'NPC' then
+        if id > 0 and id ~= except and x.Type() == 'NPC' and not FIGHT.ignored(x) then
             local xx, xy = x.X() or 0, x.Y() or 0
             for _, p in ipairs(at) do
                 local dx, dy = xx - p[1], xy - p[2]
@@ -3117,12 +3239,19 @@ end
 -- Tank role: make myself the group's main tank and main assist (needs group leader), so Chase and
 -- Assist characters with no name typed in follow / assist me
 -- Backup tank (Backup on): in a fight while the group's main tank (not me) is dead or out of the zone, tank in its
--- place - the Tank role (taunt, Tank abilities, mobs in front, target priority). Back to my own role when the fight
--- is over (nothing on the extended target list); the next fight checks again. Out of a fight (the tank travelling)
--- nothing changes
+-- place - the Tank role (taunt, Tank abilities, mobs in front, target priority). A pet class (MAG, NEC, BST) with its
+-- pet up has the pet tank instead: pet taunt on, the pet on my target, and I keep my own role (Zenban, a mage, tanked
+-- the Nokk himself and died, 2026-10-24). Back to my own role, and the pet's taunt as it was, when the fight is over
+-- (nothing on the extended target list); the next fight checks again. Out of a fight (the tank travelling) nothing changes
+function FIGHT.petTankEnd(why)
+    if not R.petTank.taunt and (mq.TLO.Me.Pet.ID() or 0) > 0 then mq.cmd('/pet taunt off') end
+    R.petTank = nil
+    log('%s - my pet stops tanking%s', why, (mq.TLO.Me.Pet.ID() or 0) > 0 and '' or ' (it died)')
+end
 local function backupCheck()
     if not S.backupTank then
         if R.backupFrom then S.role, R.backupFrom = R.backupFrom, nil; log('backup tank off - back to %s', S.role) end
+        if R.petTank then FIGHT.petTankEnd('backup tank off') end
         return
     end
     local mt = mq.TLO.Group.MainTank
@@ -3130,9 +3259,18 @@ local function backupCheck()
     if name == '' or name == (mq.TLO.Me.CleanName() or '') then return end
     local down = mt.OtherZone() or not mt.Present() or mt.Type() == 'Corpse'
     local fight = #hostiles() > 0
-    if down and fight and not R.backupFrom and S.role ~= 'Tank' then
-        R.backupFrom, S.role = S.role, 'Tank'
-        log('main tank %s is down - tanking as the backup tank', name)
+    if down and fight and not R.backupFrom and not R.petTank and S.role ~= 'Tank' then
+        local cls = mq.TLO.Me.Class.ShortName() or ''
+        if (cls == 'MAG' or cls == 'NEC' or cls == 'BST') and (mq.TLO.Me.Pet.ID() or 0) > 0 then
+            R.petTank = { taunt = mq.TLO.Pet.Taunt() == true }
+            if not R.petTank.taunt then mq.cmd('/pet taunt on') end
+            log('main tank %s is down - my pet tanks as the backup tank (pet taunt on)', name)
+        else
+            R.backupFrom, S.role = S.role, 'Tank'
+            log('main tank %s is down - tanking as the backup tank', name)
+        end
+    elseif R.petTank and not fight then
+        FIGHT.petTankEnd('fight over')
     elseif R.backupFrom and not fight then
         S.role, R.backupFrom = R.backupFrom, nil
         log('fight over - backup tank back to %s', S.role)
@@ -3244,7 +3382,7 @@ do
     local ok, mod = pcall(dofile, mq.luaDir .. '/autoxp/named.lua')
     if ok and type(mod) == 'function' then
         FIGHT.named = mod({ S = S, R = R, log = log, list = list, alive = alive, hostiles = hostiles, casting = casting,
-            zoneInfo = zoneInfo, DPS = DPS })
+            zoneInfo = zoneInfo, DPS = DPS, ignored = FIGHT.ignoredName, ignoreUI = function() FIGHT.ignoreUI() end })
     else
         log('named.lua failed to load: %s', tostring(mod))
     end
@@ -3268,11 +3406,11 @@ local function pickTarget()
         return nil
     elseif S.mode == 'Hunter' or S.mode == 'Named' then
         -- a mob already on the extended target list (on its way, or beyond hostiles() range): go for the nearest
-        -- one; never pull another while any is listed (an unreachable one just means waiting)
+        -- one; never pull another while any is listed (an unreachable one just means waiting; an ignored one doesn't count)
         local listed, near, nd = false, nil, nil
         for i = 1, (mq.TLO.Me.XTarget() or 0) do
             local x = mq.TLO.Me.XTarget(i)
-            if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' and alive(spawn(x.ID())) then
+            if x() and (x.ID() or 0) > 0 and x.Type() == 'NPC' and not FIGHT.ignored(x) and alive(spawn(x.ID())) then
                 listed = true
                 local d = x.Distance3D() or 9999
                 if (R.skip[x.ID()] or 0) < mq.gettime() and (not nd or d < nd) then near, nd = x.ID(), d end
@@ -3308,7 +3446,7 @@ local function pickTarget()
             local s = mq.TLO.NearestSpawn(i, q)
             if not s() then break end
             local id = s.ID()
-            if (R.skip[id] or 0) < mq.gettime() and not npcs[(s.CleanName() or ''):lower()] then
+            if (R.skip[id] or 0) < mq.gettime() and not npcs[(s.CleanName() or ''):lower()] and not FIGHT.ignoredName(s.CleanName()) then
                 local len = mq.TLO.Navigation.PathLength('id ' .. id)() or -1
                 if len < 0 then R.skip[id] = mq.gettime() + 30000                     -- off the navmesh
                 elseif len <= reach then
@@ -3363,7 +3501,7 @@ local function pickTarget()
             if mq.gettime() - R.lastAssist > 1500 then mq.cmdf('/assist %s', who); R.lastAssist = mq.gettime(); mq.delay(300) end
             t = mq.TLO.Target
         end
-        if t() and t.Type() == 'NPC' and (t.PctHPs() or 100) <= S.assistAt and atTank(t) then return t.ID() end
+        if t() and t.Type() == 'NPC' and (t.PctHPs() or 100) <= S.assistAt and not FIGHT.ignored(t) and atTank(t) then return t.ID() end
         if mq.TLO.Me.Combat() then attackOff() end   -- "attack on assist" before we mean to fight
         return nil
     end
@@ -3610,6 +3748,12 @@ local function fightTick()
         setState(((S.mode == 'Hunter' or S.mode == 'Named') and (hp() < S.restPct or manaLow())) and 'REST' or 'BUFF')
         return
     end
+    -- put on the ignore list mid-fight: left alone (Manual mode still fights your own pick)
+    if S.mode ~= 'Manual' and FIGHT.ignored(t) then
+        log('%s is on the ignore list - leaving it', R.targetName)
+        attackOff(); mq.cmd('/stick off'); mq.cmd('/nav stop'); petBackOff(); R.targetId, R.pickId = 0, 0; setState('FIND')
+        return
+    end
     if doRez() then return end
     -- the tank moved on to another add: go with it (looked at every 2s; a mezzed one is left mezzed)
     local gt = mq.gettime() - (R.groupSwitchAt or 0) > 2000 and FIGHT.groupTarget()
@@ -3719,6 +3863,7 @@ local function step()
     noticePick()
     if watchCast() then return end
     claimGroupRoles()
+    FIGHT.rankCheck()
     if R.feignAt > 0 and mq.gettime() - R.feignAt > 3000 then
         R.feignAt = 0
         if mq.TLO.Me.Feigning() then mq.cmd('/stand'); mq.delay(300); restoreFight() end
@@ -3798,6 +3943,11 @@ local function step()
     elseif st == 'APPROACH' then
         local t = spawn(R.targetId)
         if not alive(t) then setState('FIND'); return end
+        if S.mode ~= 'Manual' and FIGHT.ignored(t) then
+            log('%s is on the ignore list - not going for it', R.targetName)
+            mq.cmd('/nav stop'); R.waypoint, R.pull, R.groupWait, R.targetId, R.pickId = nil, nil, nil, 0, 0
+            setState('FIND'); return
+        end
         -- a walk to a pull (nothing was on us): a fight that starts on the group meanwhile comes first - the pull is
         -- dropped and FIND goes for the mob on the extended target list
         if R.pullCandidate then
@@ -4122,6 +4272,23 @@ local function combo(label, cur, items)
         ImGui.EndCombo()
     end
     return out
+end
+
+-- the ignore list box (General and Named tabs): this zone's names, applied (and passed on to the group) once the edit
+-- is done, not on every key
+function FIGHT.ignoreUI()
+    local z = mq.TLO.Zone.ShortName() or ''
+    if not R.ignoreEditing or R.ignoreEditZone ~= z then R.ignoreEdit, R.ignoreEditZone = S.ignore[z] or '', z end
+    R.ignoreEdit = ImGui.InputText('Ignore here', R.ignoreEdit)
+    R.ignoreEditing = ImGui.IsItemActive()
+    if ImGui.IsItemDeactivatedAfterEdit() then FIGHT.setIgnore(R.ignoreEdit) end
+    tip('Mobs never engaged in this zone, by name (any case), comma-separated: Hunter and Named mode never pull\nthem (ignoring a named skips its placeholders too), and nobody fights them even on the extended target\nlist, where they hold no pulls, rests or trips. A change goes to the group (DanNet).')
+    flow(100)
+    if ImGui.SmallButton('Ignore target') then
+        local t = mq.TLO.Target
+        if t() and t.Type() == 'NPC' then FIGHT.ignoreAdd(t.CleanName()) else log('Ignore target: target an NPC first') end
+    end
+    tip('Add my target\'s name to this zone\'s ignore list (/autoxp ignore).')
 end
 
 -- Group window ------------------------------------------------------------------------------
@@ -4505,7 +4672,7 @@ function draw()
         updateMapRadius()
         ImGui.Text('Role:'); ImGui.SameLine(); roleButton('Tank'); flow(70); roleButton('DPS')
         flow(70)
-        toggle('Backup', 'backupTank', 'Backup tank: while the group main tank is dead or out of the zone, tank in its place\n(Tank role: taunt, Tank abilities, mobs in front, target priority); back to DPS once it is alive\nand nothing is on the extended target list.')
+        toggle('Backup', 'backupTank', 'Backup tank: while the group main tank is dead or out of the zone, tank in its place\n(Tank role: taunt, Tank abilities, mobs in front, target priority); back to DPS once it is alive\nand nothing is on the extended target list. A mage, necromancer or beastlord with its pet up has\nthe pet tank instead (pet taunt on) and keeps its own role.')
         if S.role == 'Tank' then
             flow(70)
             local an = FIGHT.anchor()
@@ -4555,9 +4722,6 @@ function draw()
             flow(math.min(ImGui.CalcTextSize(peers), 200))
             ImGui.PushTextWrapPos(0); ImGui.TextColored(0.5, 0.8, 1, 1, peers); ImGui.PopTextWrapPos()
         end
-        bar(hp() / 100, string.format('HP %d%%', hp()))
-        bar(mana() / 100, string.format('Mana %d%%', mana()))
-        bar((mq.TLO.Me.PctExp() or 0) / 100, string.format('XP %.2f%%', mq.TLO.Me.PctExp() or 0))
         if SP.scanning then
             ImGui.TextDisabled(string.format('Checking spell book... %d%%', math.floor(100 * SP.nextId / SPELL_ID_MAX)))
         elseif #SP.list > 0 then
@@ -4597,6 +4761,7 @@ function draw()
                 S.radius = ImGui.SliderInt('Pull radius', S.radius, 100, 5000)
                 S.avoidRadius = ImGui.SliderInt('Alone radius', S.avoidRadius, 40, 200)
                 tip('Hunter pulls the closest mob in level range within the pull radius, preferring one with no other NPC this close to it, and only one whose walking route passes no other mob this close.')
+                FIGHT.ignoreUI()
                 ImGui.SetNextItemWidth(110)
                 local pm = combo('Pull with', S.pullMethod, PULLS)
                 if pm ~= S.pullMethod then S.pullMethod = pm; log('pull with %s', pm) end
@@ -4829,7 +4994,7 @@ end
 end
 
 mq.imgui.init('AutoXP', draw)
-mq.bind('/autoxp', function(cmd, a1, a2)
+mq.bind('/autoxp', function(cmd, a1, a2, ...)
     local duties = { heal = true, cc = true, debuff = true, nuke = true, dot = true, buff = true, rez = true }
     if cmd == 'start' then start() elseif cmd == 'stop' then stopAll('command')
     elseif cmd == 'pause' then setPaused(true) elseif cmd == 'resume' then setPaused(false)
@@ -4854,6 +5019,14 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif cmd == 'anchor' then
         if S.role ~= 'Tank' then log('anchor: Tank role only')
         else FIGHT.setAnchor(a1 == 'on' or (a1 == nil and not FIGHT.anchor())) end
+    elseif cmd == 'ignore' then
+        -- /autoxp ignore [name]: the name, else my target, onto this zone's ignore list (the group's too)
+        local t = mq.TLO.Target
+        if a1 then FIGHT.ignoreAdd(table.concat({ a1, a2, ... }, ' '))
+        elseif t() and t.Type() == 'NPC' then FIGHT.ignoreAdd(t.CleanName())
+        else log('ignore: target an NPC or give its name') end
+    elseif cmd == 'unignore' and a1 then FIGHT.ignoreRemove(table.concat({ a1, a2, ... }, ' '))
+    elseif cmd == 'ignoreset' and a1 then FIGHT.setIgnore(table.concat({ a2, ... }, ' '), a1, true)   -- from the group
     elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
     elseif cmd == 'set' and a1 and a2 and S[a1] ~= nil and type(S[a1]) ~= 'table' then
         -- /autoxp set <setting> <value>: any plain setting, e.g. groupHealPct 65
@@ -4864,7 +5037,7 @@ mq.bind('/autoxp', function(cmd, a1, a2)
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|ignore [name]|unignore <name>|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
 
 startSpellScan()
 if args[1] then TRIP.go(args[1]) end

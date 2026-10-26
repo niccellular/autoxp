@@ -16,6 +16,8 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp hud            (show / hide the HUD)
 /autoxp backup [on|off]          (backup tank)
 /autoxp anchor [on|off]          (Tank: the pull circle stays where I stand now)
+/autoxp ignore [name]            (the name, else my target, onto this zone's ignore list - the group's too)
+/autoxp unignore <name>
 /autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
 /autoxp travel [zone]            (travel there, the whole group with "Whole group" on)
 /autoxp travel stop
@@ -45,7 +47,9 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
 - **Role:** Tank (front, taunt, stun-lock, target priority, keeps mobs in front) or DPS (behind or at range).
   Duties are separate toggles: Heal, CC, Debuff, Nuke, DoT, Buff, Rez (e.g. a healer can opt out of nukes or DoTs).
   **Backup** (backup tank): while the group main tank is dead or out of the zone, this character tanks in its place
-  (Tank role), and goes back to its own role once the main tank is alive and the fight is over.
+  (Tank role), and goes back to its own role once the main tank is alive and the fight is over. A mage, necromancer
+  or beastlord with its pet up has the pet tank instead (pet taunt on, the pet on its target) and keeps its own role;
+  the pet's taunt goes back to how it was after the fight.
   Non-tanks in Chase / Assist join a pulled mob once it has reached the main tank (or after 6s), so they don't
   pull it off the tank on the way in. Following the group main assist, they fight its target whenever it is on their
   extended target list (first pick, next add, and when it switches mid-fight), not their own priority pick.
@@ -87,6 +91,12 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   ENC, BRD, MAG, WIZ, NEC) is under it in mana (a bard: under 20%), a groupmate is casting its buffs (up to 60s each; a bard's songs
   don't count) or a groupmate is walking to or resurrecting a corpse (up to 3 minutes each).
   NPCs listed in the zone's Find Window (quest givers, merchants, bankers) are never hunted.
+  **Ignore here** (General and Named tabs; Ignore target, `/autoxp ignore`): mobs, by name, never engaged in that
+  zone. Hunter and Named mode never pull them (ignoring a named skips its placeholders too), and nobody fights,
+  assists on, mezzes or waits for them even on the extended target list - one there holds no pulls, rests or trips
+  (Laurion Inn's sharks fly up out of reach once aggroed and stayed on it for good). One that does attack is not
+  fought back; the healers still heal. They still count as mobs in the way of a route. Manual mode still fights your
+  own pick. Kept per zone, and a change goes to the group over DanNet.
   **Anchor** (Tank role, next to Backup): the pull circle normally moves with the tank. Clicking Anchor drops it where
   the tank stands: Hunter then pulls only mobs within the pull radius of that spot, and the map circle (an MQ2Map
   maploc) stays there. It is set only by the button (or `/autoxp anchor`), kept for that zone across reloads, and
@@ -120,12 +130,16 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   Debuff abilities (role Debuff: Malaise, Wind of Malaise, Sha's Reprisal...) go before the Debuffs list, and a mob
   gets one of each kind (malo, slow, cripple). Who debuffs is per character: turn Debuff off on a healer to keep it
   healing (e.g. the mage malos, the beastlord slows, the shaman heals).
-- **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically; passive AAs,
+- **Abilities scan:** class and archetype AAs (never a gate / teleport / evac one automatically, nor one that moves you
+  (Dimensional Shield's proc jumps you 24 feet backwards when hit) or makes the mobs forget everyone (Companion of
+  Necessity); one that only lowers your hate (Arcane Whisper) is used like feign death, by a DPS with top aggro; passive AAs,
   run-speed ones, memory blurs and knockbacks with no real damage (Silent / Sonic Displacement) are Off; an AA that
   can't be kept up is a burn, not a buff; a pet AA is a burn when it makes the pet hit harder, else role Pet).
   Per ability in the settings file:
   `excl = '<tag>'` makes abilities with that tag take turns (the next only once the earlier ones are used and faded),
   `notWith = 'A, B'` skips it while a buff starting with A or B is on you.
+  A new rank of a discipline (Kanghammer's Carapace Rk. II) takes the old rank's place within a minute, out of
+  fights, with its role and settings.
 - **Fights:** burns on any named on the extended target list, or on 5+ mobs there (Burn on mobs); a discipline that
   lasts waits for the running one. Under Gift of Mana (the next spell is free) the most expensive ready DoT or nuke goes
   first, at any mana; under a twincast (Twincast, Improved Twincast, Bifold Focus) the most expensive one above its
@@ -171,6 +185,8 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   Deepshade's named gear, Laurion's Song's "... of Memoryforged Desolation" items, the tradeable named gear of Laurion
   Inn, Timorous Falls and Ankexfen Keep, the No Trade named gear of the LS tier 2 zones, and LS named power sources;
   in a zone with a `named/<zone>.lua`, every drop of its named (Named mode's data, any mode). Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
+  It needs the Advanced Looting System on (`/useadvlooting`; `/use ...` is short for it and turns it off): the log
+  says when it goes off.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under
