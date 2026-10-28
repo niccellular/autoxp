@@ -19,6 +19,7 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp ignore [name]            (the name, else my target, onto this zone's ignore list - the group's too)
 /autoxp unignore <name>
 /autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
+/autoxp tier <panic|mitigate|sustain|named> <ability>   (when a Defense ability is used)
 /autoxp travel [zone]            (travel there, the whole group with "Whole group" on)
 /autoxp travel stop
 /autoxp named reload|scrape         (Named mode's zone data: load again / read eqresource.com again)
@@ -141,7 +142,12 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   A new rank of a discipline (Kanghammer's Carapace Rk. II) takes the old rank's place within a minute, out of
   fights, with its role and settings.
 - **Fights:** burns on any named on the extended target list, or on 5+ mobs there (Burn on mobs); a discipline that
-  lasts waits for the running one. Under Gift of Mana (the next spell is free) the most expensive ready DoT or nuke goes
+  lasts waits for the running one.
+  Defense by tier (Abilities tab, or `/autoxp tier`): panic below Panic HP %, mitigate below Defense HP %, sustain
+  (Carapace) also while tanking 3+ mobs or a named, named (Mantle, Guardian: a 10 min+ reuse) only while tanking a named.
+  Defensive disciplines chain one at a time in list order (Carapace, Mantle, Guardian - as CWTN's MQ2EsKay), only
+  while no discipline runs; a running one, yours too, is never stopped. Deflection Discipline only when no other
+  defensive discipline is ready. Under Gift of Mana (the next spell is free) the most expensive ready DoT or nuke goes
   first, at any mana; under a twincast (Twincast, Improved Twincast, Bifold Focus) the most expensive one above its
   mana %, or with a twincast order set ("Twincast nukes", "Improved Twincast nukes") the first ready one of it and no
   other nuke until the twincast ends. Your combat buffs go after the burns (the Twincast spell no longer holds up

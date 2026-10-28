@@ -459,6 +459,7 @@ local function useAbility(a, id, why)
     if readyNow(a) then backoff(a.name, 'did not fire', 20000); return false end
     log('use %s %s (%s)', a.kind, a.name, why)
     R.abilUsed[a.name] = mq.gettime()
+    if a.kind == 'disc' and (mq.TLO.Spell(a.name).Duration.TotalSeconds() or 0) > 0 then R.discAt, R.discName = mq.gettime(), a.name end
     R.myBuffsAt = 0
     return true
 end
@@ -557,9 +558,11 @@ local OFFENSE = { [2] = true, [85] = true, [119] = true, [169] = true, [171] = t
     [185] = true, [186] = true, [200] = true, [216] = true, [220] = true, [279] = true, [294] = true, [330] = true,
     [339] = true, [364] = true, [419] = true, [433] = true }
 
--- Defense tiers: panic = short big absorb or block, mitigate = less melee damage taken, sustain = the rest
-local function defTier(fx, dur)
+-- Defense tiers: panic = short big absorb or block, named = a discipline with a 10 min+ reuse (Mantle 15 min, Guardian
+-- 12 min: kept for named), mitigate = less melee damage taken, sustain = the rest (Carapace, 7.5 min)
+local function defTier(fx, dur, slow)
     if fx[320] or (math.max(fx[161] or 0, fx[162] or 0, fx[55] or 0) >= 50 and dur <= 30) then return 'panic' end
+    if slow then return 'named' end
     if (fx[168] or 0) < 0 then return 'mitigate' end
     return 'sustain'
 end
@@ -603,6 +606,7 @@ local function classify(name, kind)
     for k in pairs(OFFENSE) do if pos(k) then off = true end end
     -- an AA that can't be kept up (Heart of Skyfire: 3 minutes, 15 minute reuse) is a burn, not a buff
     local reuse = kind == 'aa' and (mq.TLO.Me.AltAbility(name).ReuseTime() or 0) or 0
+    local slow = kind == 'disc' and (sp.Duration.TotalSeconds() or 0) > 0 and (sp.RecastTime() or 0) >= 600000
 
     if fx[74] then return 'Off' end                                   -- feign death: only to shed aggro (doShed)
     if fx[63] then return 'Off' end                                   -- memory blur (Silent Displacement): the tank's hate goes too
@@ -634,7 +638,7 @@ local function classify(name, kind)
     -- real defense: a sizeable absorb, less damage taken, avoidance or block (a 5% rune riding on a burn isn't)
     if (self or group) and ((fx[161] or 0) >= 20 or (fx[162] or 0) >= 20 or pos(55) or (fx[168] or 0) < 0 or (fx[172] or 0) >= 20
         or fx[320] or fx[443] or fx[446] or fx[450] or fx[451] or fx[452]) then
-        return 'Defense', defTier(fx, dur)
+        return 'Defense', defTier(fx, dur, slow)
     end
     if self and pos(189) and not off then return 'Endurance' end
     if is('Quick Heal', 'Duration Heals') then return 'Heal' end
@@ -660,7 +664,7 @@ local function classify(name, kind)
     if self and dur >= 120 then return reuse <= dur + 60 and 'Buff' or 'Burn' end
     local d = descRole(sp.Description())
     if d == 'Offense' then return (self or group) and dur > 0 and 'Burn' or 'DPS' end
-    if d == 'Defense' then return 'Defense', defTier(fx, dur) end
+    if d == 'Defense' then return 'Defense', defTier(fx, dur, slow) end
     return d or 'Off'
 end
 
@@ -696,7 +700,7 @@ end
 local ABILUSE = {
     Off = 'Never used.', Tank = 'Tank role only: on cooldown in fights (Taunt when your aggro slips).',
     DPS = 'On cooldown in fights.', Burn = 'On burns: a named mob on XTarget, a target at/above your level, the burn mob count, or /autoxp burn.',
-    Defense = 'panic: below Panic HP %.  mitigate: below Defense HP %.\nsustain: below Defense HP %, or (Tank role) on a named or 2+ mobs.',
+    Defense = 'panic: below Panic HP %.  mitigate: below Defense HP %.\nsustain: below Defense HP %, or (Tank role) on a named or 3+ mobs.\nnamed: (Tank role) while a named is on the extended target list; others below Defense HP %.\nDisciplines go one at a time in list order, only while none runs (yours are never stopped).',
     Heal = 'When you or a group member are under the heal thresholds.', Emergency = 'When your HP is under the emergency %.',
     CC = 'Interrupting a casting mob and stunning adds.', Buff = 'Kept up out of combat.',
     Debuff = 'Debuff duty: once per mob, before the Debuffs list (malo on adds waiting for a mez first).',
@@ -714,7 +718,7 @@ local function scanAbilities()
         if type(name) == 'string' and name ~= '' and name ~= 'NULL' and not seen[name] then
             seen[name] = true
             local role, tier = classify(name, kind)
-            local enabled, userRole, prev = true, false, nil
+            local enabled, userRole, prev, userTier = true, false, nil, nil
             -- the saved entry: this name, else (a disc) an older rank of its line, whose settings it takes over
             local same
             for _, old in ipairs(S.abilities) do
@@ -725,11 +729,12 @@ local function scanAbilities()
             if prev then
                 enabled = prev.enabled ~= false
                 if prev.userRole then role, tier, userRole = prev.role, prev.tier or tier, true end
+                if prev.userTier then tier, userTier = prev.tier, true end
                 oldPos[name] = oldPos[name] or oldPos[prev.name]
             end
             local sp = abilitySpell({ name = name, kind = kind })
             local lvl = sp and sp() and (sp.Level() or 0) or 0
-            table.insert(found, { name = name, kind = kind, role = role, tier = tier, enabled = enabled, userRole = userRole,
+            table.insert(found, { name = name, kind = kind, role = role, tier = tier, enabled = enabled, userRole = userRole, userTier = userTier,
                 lvl = lvl < 255 and lvl or 0, id = sp and sp() and sp.ID() or 0, timer = kind == 'disc' and sp and sp() and sp.RecastTimerID() or 0,
                 excl = prev and prev.excl, notWith = prev and prev.notWith })
         end
@@ -1730,12 +1735,13 @@ function FIGHT.exclWait(a)
 end
 
 -- one discipline runs at a time: one that lasts waits while another runs (Spite of Mirenilla "did not fire" 41 times
--- under Carapace)
+-- under Carapace), and for 3s after I started one - the game shows it running a second late (Corrupted Guardian "did not
+-- fire" right after Geomimus Mantle, then waited 20s)
 function FIGHT.discBusy(a)
-    if a.kind ~= 'disc' then return false end
+    if a.kind ~= 'disc' or (mq.TLO.Spell(a.name).Duration.TotalSeconds() or 0) <= 0 then return false end
     local active = mq.TLO.Me.ActiveDisc()
-    if not active or active == '' or active == a.name then return false end
-    return (mq.TLO.Spell(a.name).Duration.TotalSeconds() or 0) > 0
+    if active and active ~= '' then return active ~= a.name end
+    return R.discName ~= a.name and mq.gettime() - (R.discAt or 0) < 3000
 end
 
 -- a detrimental AE (PB, targeted, directional) needs 2+ mobs on XTarget, no mezzed one in its reach and no idle NPC
@@ -1822,31 +1828,53 @@ function FIGHT.keepInvis()
     return true
 end
 
--- Defense abilities by tier: panic below panicPct, mitigate below defPct, sustain (Carapace / Mantle style)
--- below defPct, or for the Tank role on a named mob or 2+ mobs (a mage's absorbs went at 100% HP whenever it held aggro)
+-- Defense abilities by tier: panic below panicPct, mitigate below defPct; sustain below defPct, or for the Tank role on
+-- 3+ mobs or a named; named for the Tank role while a named is on the extended target list, for others below defPct (a
+-- mage's absorbs went at 100% HP whenever it held aggro; Ramakrr used Mantle and Guardian 184 times at 90%+ HP on any
+-- 2-mob pull, and Carapace was down when Firestarter Tlag came). Disciplines chain as MQ2EsKay's tank burn does: one at
+-- a time in list order (Carapace, then Mantle once Carapace is down, then Guardian), each only while no discipline runs -
+-- a running one, yours too, is never stopped (Leechcurse was stopped for a Deflection that couldn't fire). A last-resort
+-- disc (Deflection Discipline) only when no other defensive disc is ready or running
+FIGHT.LASTDEF = { ['Deflection Discipline'] = true }
+FIGHT.DEFTIERS = { 'panic', 'mitigate', 'sustain', 'named' }
 local function doDefense()
     local mobs = hostiles()
     if #mobs == 0 then return false end
-    local h, t = hp(), spawn(R.targetId)
+    local h = hp()
     local tank = S.role == 'Tank'
-    for _, a in ipairs(abilitiesFor('Defense')) do
+    local named = false
+    for _, x in ipairs(mobs) do if x.Named() then named = true end end
+    local defs = abilitiesFor('Defense')
+    for _, a in ipairs(defs) do
         local tier = a.tier or 'sustain'
         local want = (tier == 'panic' and h < S.panicPct) or (tier == 'mitigate' and h < S.defPct)
-            or (tier == 'sustain' and (h < S.defPct or (tank and (#mobs >= 2 or (alive(t) and t.Named())))))
-        if want and not abilityUp(a) then
-            -- only one discipline runs at a time: stop an offensive one so the defensive one can start
-            local active = mq.TLO.Me.ActiveDisc()
-            local busy = false
-            if a.kind == 'disc' and active and active ~= a.name then
-                local def = false
-                for _, o in ipairs(S.abilities) do if o.name == active and o.role == 'Defense' then def = true end end
-                if def then busy = true                                       -- a defensive disc is already running
-                else log('stopping %s for %s', active, a.name); mq.cmd('/stopdisc'); mq.delay(300) end
+            or (tier == 'sustain' and (h < S.defPct or (tank and (#mobs >= 3 or named))))
+            or (tier == 'named' and ((tank and named) or (not tank and h < S.defPct)))
+        if want and FIGHT.LASTDEF[a.name] then
+            for _, o in ipairs(defs) do
+                if o.kind == 'disc' and not FIGHT.LASTDEF[o.name] and (abilityUp(o) or abilityReady(o)) then want = false; break end
             end
-            if not busy and useAbility(a, nil, string.format('%s, HP %d%%', tier, h)) then return true end
+        end
+        if want and not abilityUp(a) and not FIGHT.discBusy(a) and useAbility(a, nil, string.format('%s, HP %d%%', tier, h)) then
+            return true
         end
     end
     return false
+end
+
+-- a Defense ability's tier, picked in the Abilities tab or with /autoxp tier <tier> <ability>; a rescan keeps it
+function FIGHT.setTier(a, tier)
+    a.tier, a.userTier = tier, true
+    log('%s: tier %s', a.name, tier); save()
+end
+function FIGHT.tierCmd(tier, name)
+    local ok = false
+    for _, t in ipairs(FIGHT.DEFTIERS) do if t == tier then ok = true end end
+    if not ok then log('tier: one of %s', table.concat(FIGHT.DEFTIERS, ', ')); return end
+    for _, a in ipairs(S.abilities) do
+        if a.name:lower() == name:lower() then FIGHT.setTier(a, tier); return end
+    end
+    log('tier: no ability named %s', name)
 end
 
 -- my pet's abilities (role Pet), in a fight: a heal under 30% pet HP (Mend Companion), a guard not on it yet once a mob
@@ -4847,7 +4875,7 @@ function draw()
                 S.burnCount = ImGui.SliderInt('##burnCount', S.burnCount, 2, 10)
                 tip('Burn once this many mobs are on the extended target list.')
                 S.defPct = ImGui.SliderInt('Defense below HP %', S.defPct, 10, 90)
-                tip('Defense (mitigate) abilities below this. Sustained ones (Carapace, Mantle) also while tanking a named or 2+ mobs.')
+                tip('Defense (mitigate) abilities below this. Sustain ones (Carapace) also while tanking a named or 3+ mobs;\nnamed ones (Mantle, Guardian) only while tanking a named.')
                 S.panicPct = ImGui.SliderInt('Panic below HP %', S.panicPct, 5, 60)
                 tip('Defense (panic) abilities - short big absorbs and blocks (Spurn, Deflection) - below this.')
                 S.endPct = ImGui.SliderInt('Endurance abilities below %', S.endPct, 5, 90)
@@ -4873,6 +4901,12 @@ function draw()
                         ImGui.SameLine(); ImGui.SetNextItemWidth(95)
                         local r = combo('##role' .. i, a.role, ROLES)
                         if r ~= a.role then a.role, a.userRole, a.note = r, true, nil; log('%s -> %s', a.name, r); save() end
+                        if a.role == 'Defense' then
+                            ImGui.SameLine(); ImGui.SetNextItemWidth(85)
+                            local tr = combo('##tier' .. i, a.tier or 'sustain', FIGHT.DEFTIERS)
+                            if tr ~= (a.tier or 'sustain') then FIGHT.setTier(a, tr) end
+                            tip(ABILUSE.Defense)
+                        end
                         ImGui.SameLine(); if ImGui.SmallButton('^##up' .. i) and i > 1 then move = { i, i - 1 } end
                         ImGui.SameLine(); if ImGui.SmallButton('v##dn' .. i) and i < #S.abilities then move = { i, i + 1 } end
                         ImGui.SameLine()
@@ -5028,6 +5062,7 @@ mq.bind('/autoxp', function(cmd, a1, a2, ...)
     elseif cmd == 'unignore' and a1 then FIGHT.ignoreRemove(table.concat({ a1, a2, ... }, ' '))
     elseif cmd == 'ignoreset' and a1 then FIGHT.setIgnore(table.concat({ a2, ... }, ' '), a1, true)   -- from the group
     elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
+    elseif cmd == 'tier' and a1 and a2 then FIGHT.tierCmd(a1, table.concat({ a2, ... }, ' '))
     elseif cmd == 'set' and a1 and a2 and S[a1] ~= nil and type(S[a1]) ~= 'table' then
         -- /autoxp set <setting> <value>: any plain setting, e.g. groupHealPct 65
         if type(S[a1]) == 'number' then S[a1] = tonumber(a2) or S[a1]
@@ -5037,7 +5072,7 @@ mq.bind('/autoxp', function(cmd, a1, a2, ...)
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|ignore [name]|unignore <name>|group|hud [on|off]|set <setting> <value>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|ignore [name]|unignore <name>|group|hud [on|off]|set <setting> <value>|tier <tier> <ability>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
 
 startSpellScan()
 if args[1] then TRIP.go(args[1]) end
