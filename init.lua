@@ -2860,6 +2860,16 @@ local function canRez()
     for _, n in ipairs(REZAA) do if mq.TLO.Me.AltAbility(n)() then return true end end
     return rezSpell() ~= ''
 end
+-- every corpse of name here, nearest first. Spawn() gives only the nearest: after a wipe and the Guild Lobby summon
+-- Seaeni had three corpses side by side, and Lolelena never saw the one behind the two she rezzed (2026-10-29)
+local function corpsesOf(name)
+    local search, want, out = 'pccorpse ' .. name .. "'s corpse", name .. "'s corpse", {}
+    for i = 1, (mq.TLO.SpawnCount(search)() or 0) do
+        local c = mq.TLO.NearestSpawn(i, search)
+        if c() and (c.ID() or 0) > 0 and c.CleanName() == want then out[#out + 1] = c end
+    end
+    return out
+end
 
 -- in a fight someone who died stays dead for 10s while the heals go to the living, and is rezzed only while the main
 -- tank and main assist still stand (a rez in a wipe only gives the mobs another target; out of combat is unchanged)
@@ -2877,12 +2887,13 @@ function FIGHT.rezPending()
     R.rezWait = R.rezWait or {}
     for i = 0, (mq.TLO.Group.Members() or 0) do
         local n = i == 0 and ME or mq.TLO.Group.Member(i).Name()
-        local c = n and mq.TLO.Spawn('pccorpse ' .. n .. "'s corpse")
-        local cid = c and c() and c.ID() or 0
-        if cid > 0 and not rezzedBefore(c, i > 0 and mq.TLO.Group.Member(i).Type() == 'Corpse') and ((R.corpseSkip or {})[cid] or 0) < mq.gettime()
-            and not (R.dragFailed or {})[cid] then
-            R.rezWait[cid] = R.rezWait[cid] or mq.gettime()
-            if mq.gettime() - R.rezWait[cid] < 300000 then return (i == 0 and 'my corpse' or n .. "'s corpse") .. ' is waiting for my rez' end
+        for _, c in ipairs(n and corpsesOf(n) or {}) do
+            local cid = c.ID() or 0
+            if not rezzedBefore(c, i > 0 and mq.TLO.Group.Member(i).Type() == 'Corpse') and ((R.corpseSkip or {})[cid] or 0) < mq.gettime()
+                and not (R.dragFailed or {})[cid] then
+                R.rezWait[cid] = R.rezWait[cid] or mq.gettime()
+                if mq.gettime() - R.rezWait[cid] < 300000 then return (i == 0 and 'my corpse' or n .. "'s corpse") .. ' is waiting for my rez' end
+            end
         end
     end
 end
@@ -2910,60 +2921,61 @@ function doRez()
     R.corpseSkip, R.dragFailed = R.corpseSkip or {}, R.dragFailed or {}
     for _, w in ipairs(who) do
         local name = w.me and 'my corpse' or w.name
-        local c = mq.TLO.Spawn('pccorpse ' .. w.name .. "'s corpse")
-        local cid = c and c() and c.ID() or 0
-        local near = cid > 0 and (c.Distance3D() or 999) < 100 and c.LineOfSight()
-        -- out of reach: /corpse drags it over; not here within 3s (out of range, or no consent): left for a minute, the
-        -- loop going on meanwhile
-        if not fight and cid > 0 and not near and not rezzedBefore(c, w.dead) and (R.corpseSkip[cid] or 0) < mq.gettime() and canRez() then
-            local d = R.drag
-            if not d or d.id ~= cid then
-                if targetId(cid) then
-                    mq.cmd('/corpse')
-                    R.drag, R.rezBusyAt = { id = cid, at = mq.gettime() }, mq.gettime()
-                    return true
-                end
-            elseif mq.gettime() - d.at < 3000 then
-                R.rezBusyAt = mq.gettime()
-                return true
-            else
-                if not R.dragFailed[cid] then
-                    log('/corpse did not bring %s (%.0f away: out of range, or no consent) - looking again every minute',
-                        w.me and 'my corpse' or (name .. "'s corpse"), c.Distance3D() or 0)
-                end
-                R.drag, R.corpseSkip[cid], R.dragFailed[cid] = nil, mq.gettime() + 60000, true
-            end
-        end
-        if near and R.drag and R.drag.id == cid then
-            log('dragged %s over with /corpse', w.me and 'my corpse' or (name .. "'s corpse"))
-            R.drag, R.dragged, R.dragFailed[cid] = nil, cid, nil
-        end
-        if near and not rezzedBefore(c, w.dead) and (not fight or (w.dead and FIGHT.rezNow(w.name))) then
-            local key = c.ID() .. '|rez'
-            for _, n in ipairs(fight and COMBATREZ or REZAA) do
-                if mq.TLO.Me.AltAbilityReady(n)() and mq.gettime() - (R.buffTry[key] or 0) > (fight and 10000 or 60000) and targetId(c.ID()) then
-                    R.buffTry[key], R.rezBusyAt = mq.gettime(), mq.gettime()
-                    if mq.TLO.Me.Sitting() then mq.cmd('/stand'); mq.delay(300) end
-                    -- held still for the cast: that rez on Zenban broke as Chase set off after the tank mid-cast
-                    local resume = holdMovement()
-                    local again = w.dead and S.rezDone[corpseKey(c)] ~= nil
-                    mq.cmdf('/alt act %d', mq.TLO.Me.AltAbility(n).ID() or 0)
-                    mq.delay(1000, casting)
-                    if casting() or not mq.TLO.Me.AltAbilityReady(n)() then
-                        log('rez %s (%s)%s', name, n, again and ' - again, the last one did not take' or '')
-                        local rk = not fight and markRezzed(c) or nil
-                        if casting() then R.cast = { name = n, id = c.ID(), kind = 'heal', resume = resume, rezKey = rk } else resume() end
-                    else
-                        resume()
+        for _, c in ipairs(corpsesOf(w.name)) do
+            local cid = c.ID() or 0
+            local near = cid > 0 and (c.Distance3D() or 999) < 100 and c.LineOfSight()
+            -- out of reach: /corpse drags it over; not here within 3s (out of range, or no consent): left for a minute, the
+            -- loop going on meanwhile
+            if not fight and cid > 0 and not near and not rezzedBefore(c, w.dead) and (R.corpseSkip[cid] or 0) < mq.gettime() and canRez() then
+                local d = R.drag
+                if not d or d.id ~= cid then
+                    if targetId(cid) then
+                        mq.cmd('/corpse')
+                        R.drag, R.rezBusyAt = { id = cid, at = mq.gettime() }, mq.gettime()
+                        return true
                     end
+                elseif mq.gettime() - d.at < 3000 then
+                    R.rezBusyAt = mq.gettime()
                     return true
+                else
+                    if not R.dragFailed[cid] then
+                        log('/corpse did not bring %s (%.0f away: out of range, or no consent) - looking again every minute',
+                            w.me and 'my corpse' or (name .. "'s corpse"), c.Distance3D() or 0)
+                    end
+                    R.drag, R.corpseSkip[cid], R.dragFailed[cid] = nil, mq.gettime() + 60000, true
                 end
             end
-            local sp = not fight and rezSpell() or ''
-            if sp ~= '' and tryBuff(sp, c.ID(), 'rez ' .. name) then
-                R.rezBusyAt = mq.gettime()
-                if R.cast and R.cast.id == c.ID() then R.cast.rezKey = markRezzed(c) end
-                return true
+            if near and R.drag and R.drag.id == cid then
+                log('dragged %s over with /corpse', w.me and 'my corpse' or (name .. "'s corpse"))
+                R.drag, R.dragged, R.dragFailed[cid] = nil, cid, nil
+            end
+            if near and not rezzedBefore(c, w.dead) and (not fight or (w.dead and FIGHT.rezNow(w.name))) then
+                local key = c.ID() .. '|rez'
+                for _, n in ipairs(fight and COMBATREZ or REZAA) do
+                    if mq.TLO.Me.AltAbilityReady(n)() and mq.gettime() - (R.buffTry[key] or 0) > (fight and 10000 or 60000) and targetId(c.ID()) then
+                        R.buffTry[key], R.rezBusyAt = mq.gettime(), mq.gettime()
+                        if mq.TLO.Me.Sitting() then mq.cmd('/stand'); mq.delay(300) end
+                        -- held still for the cast: that rez on Zenban broke as Chase set off after the tank mid-cast
+                        local resume = holdMovement()
+                        local again = w.dead and S.rezDone[corpseKey(c)] ~= nil
+                        mq.cmdf('/alt act %d', mq.TLO.Me.AltAbility(n).ID() or 0)
+                        mq.delay(1000, casting)
+                        if casting() or not mq.TLO.Me.AltAbilityReady(n)() then
+                            log('rez %s (%s)%s', name, n, again and ' - again, the last one did not take' or '')
+                            local rk = not fight and markRezzed(c) or nil
+                            if casting() then R.cast = { name = n, id = c.ID(), kind = 'heal', resume = resume, rezKey = rk } else resume() end
+                        else
+                            resume()
+                        end
+                        return true
+                    end
+                end
+                local sp = not fight and rezSpell() or ''
+                if sp ~= '' and tryBuff(sp, c.ID(), 'rez ' .. name) then
+                    R.rezBusyAt = mq.gettime()
+                    if R.cast and R.cast.id == c.ID() then R.cast.rezKey = markRezzed(c) end
+                    return true
+                end
             end
         end
     end
@@ -3616,6 +3628,8 @@ local function watchCast()
     mq.cmd(mq.TLO.Me.Class.ShortName() == 'BRD' and '/stopsong' or '/stopcast')
     mq.delay(500, function() return not casting() end)
     R.cast, R.duckAt = nil, mq.gettime()
+    -- a ducked rez isn't done: Lolelena ducked Incarnate Anew on Seaeni's corpse for a heal, and it stayed marked (2026-10-29)
+    if c.rezKey then R.rezzed[c.id], S.rezDone[c.rezKey] = nil, nil end
     c.resume()
     return false
 end
