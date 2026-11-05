@@ -19,6 +19,7 @@ Put this folder at `<MQ>/lua/autoxp` (or junction it there), then in game:
 /autoxp ignore [name]            (the name, else my target, onto this zone's ignore list - the group's too)
 /autoxp unignore <name>
 /autoxp set <setting> <value>    (any plain setting, e.g. groupHealPct 65)
+/autoxp use <Off|Tank|DPS|Burn|...> <ability>   (an ability's role, as the Abilities tab combo; kept on rescan)
 /autoxp tier <panic|mitigate|sustain|named> <ability>   (when a Defense ability is used)
 /autoxp travel [zone]            (travel there, the whole group with "Whole group" on)
 /autoxp travel stop
@@ -99,8 +100,8 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   fought back; the healers still heal. They still count as mobs in the way of a route. Manual mode still fights your
   own pick. Kept per zone, and a change goes to the group over DanNet.
   **Anchor** (Tank role, next to Backup): the pull circle normally moves with the tank. Clicking Anchor drops it where
-  the tank stands: Hunter then pulls only mobs within the pull radius of that spot, and the map circle (an MQ2Map
-  maploc) stays there. It is set only by the button (or `/autoxp anchor`), kept for that zone across reloads, and
+  the tank stands: Hunter then pulls only mobs, and Named only named and placeholders, within the pull radius of that
+  spot, and the map circle (an MQ2Map maploc) stays there. It is set only by the button (or `/autoxp anchor`), kept for that zone across reloads, and
   lifted by clicking it again.
 - **Named mode** (Named tab): the tank hunts only the zone's named mobs and their placeholders; the group follows in
   Chase. The zone's named, placeholders, the map points players posted in the page comments and every named drop

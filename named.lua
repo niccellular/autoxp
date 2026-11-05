@@ -146,9 +146,10 @@ local function ignored(t)
     return true
 end
 
--- the live named and placeholders (whole zone) in route order: a named first (the closest), then clockwise from my
--- clock position (one within 150 of me counts as where I stand)
+-- the live named and placeholders (whole zone; within the pull radius of the anchor when one is set) in route order: a
+-- named first (the closest), then clockwise from my clock position (one within 150 of me counts as where I stand)
 function N.scan()
+    local anchor = X.anchor and X.anchor()
     if not D then N.targets = {}; return N.targets end
     local now, xt = mq.gettime(), {}
     for i = 1, (mq.TLO.Me.XTarget() or 0) do
@@ -167,7 +168,7 @@ function N.scan()
                 got[id] = true
                 if (R.skip[id] or 0) < now and ((s.PctHPs() or 100) >= 100 or xt[id]) then
                     local t = { id = id, name = s.CleanName() or '?', kind = e.kind, of = e.named, y = s.Y() or 0, x = s.X() or 0, z = s.Z() or 0 }
-                    if (t.kind == 'named' or atSpot(t)) and not ignored(t) then out[#out + 1] = t end
+                    if (t.kind == 'named' or atSpot(t)) and not ignored(t) and (not anchor or near(t, anchor, S.radius)) then out[#out + 1] = t end
                 end
             end
         end
@@ -288,7 +289,8 @@ function N.pick()
             end
         end
         if not g then
-            N.status = #ts == 0 and 'nothing up - waiting' or 'no path to anything up - waiting'
+            N.status = #ts == 0 and ('nothing up' .. (X.anchor and X.anchor() and ' within the pull radius of the anchor' or '') .. ' - waiting')
+                or 'no path to anything up - waiting'
             if not N.idle then N.idle = true; log('named: %s', N.status) end
             return nil
         end

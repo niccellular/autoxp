@@ -98,7 +98,26 @@ local TRIP = {}   -- travel (the Travel tab, /autoxp travel), filled in after th
 local function casting()
     -- a bard keeps "casting" the song it holds; only the cast bar means busy
     if mq.TLO.Me.Class.ShortName() == 'BRD' then return mq.TLO.Window('CastingWindow').Open() == true end
-    return mq.TLO.Me.Casting() ~= nil
+    local c = mq.TLO.Me.Casting()
+    if c == nil then R.staleCast = nil; return false end
+    -- the client can hold on to a cast that never went off: Zenban's weapon pack unfold click sat "casting" for 20
+    -- minutes with no cast bar, its time left wrapped past zero, and everything waited on it - a script restart changes
+    -- nothing, it's the client (2026-10-30 16:12). After 5s of that it's over: /stopcast clears it, else a camp does
+    if (tonumber(mq.TLO.Me.CastTimeLeft()) or 0) > 2147483647 and not mq.TLO.Window('CastingWindow').Open() then
+        R.staleCast = R.staleCast or mq.gettime()
+        if mq.gettime() - R.staleCast > 5000 then
+            if mq.gettime() - (R.staleStop or 0) > 60000 then
+                log('%s is still "casting" with no cast bar (stuck in the client) - /stopcast%s', c,
+                    R.staleStop and ' did not clear it: camp out and back' or '')
+                R.staleStop = mq.gettime()
+                mq.cmd('/stopcast')
+            end
+            return false
+        end
+    else
+        R.staleCast = nil
+    end
+    return true
 end
 local function spawn(id) return id and id > 0 and mq.TLO.Spawn('id ' .. id) or nil end
 -- dead = corpse; a living mob can read 0% HP (a sliver left), so HP% never means dead
@@ -848,8 +867,8 @@ function FIGHT.rankCheck()
     if n > 0 then save() end
 end
 local mapRadius = -1
--- the Anchor button (Tank role): the pull circle dropped on a spot of a zone - Hunter pulls around it instead of around
--- me, and the map shows it there (an MQ2Map maploc) instead of the SpellRadius circle that follows me. Set only by the
+-- the Anchor button (Tank role): the pull circle dropped on a spot of a zone - Hunter and Named pull around it instead of
+-- around me, and the map shows it there (an MQ2Map maploc) instead of the SpellRadius circle that follows me. Set only by the
 -- button or /autoxp anchor; nil when there is none in this zone
 function FIGHT.anchor()
     local a = S.anchor
@@ -885,7 +904,7 @@ function FIGHT.setAnchor(on)
     if on then
         local function r(v) return math.floor((v or 0) + 0.5) end
         S.anchor = { zone = mq.TLO.Zone.ShortName() or '', x = r(mq.TLO.Me.X()), y = r(mq.TLO.Me.Y()), z = r(mq.TLO.Me.Z()) }
-        log('anchored the pull circle at %d, %d in %s: Hunter pulls within %d of it', S.anchor.y, S.anchor.x, S.anchor.zone, S.radius)
+        log('anchored the pull circle at %d, %d in %s: Hunter and Named pull within %d of it', S.anchor.y, S.anchor.x, S.anchor.zone, S.radius)
     else
         S.anchor = false
         log('anchor lifted: the pull circle follows me again')
@@ -1876,6 +1895,20 @@ function FIGHT.tierCmd(tier, name)
     end
     log('tier: no ability named %s', name)
 end
+-- an ability's role from the command line (/autoxp use <role> <ability>), as the Abilities tab combo: yours, kept on rescan
+function FIGHT.roleCmd(role, name)
+    local r
+    for _, x in ipairs(ROLES) do if x:lower() == role:lower() then r = x end end
+    if not r then log('use: one of %s', table.concat(ROLES, ', ')); return end
+    for _, a in ipairs(S.abilities) do
+        if a.name:lower() == name:lower() then
+            a.role, a.userRole, a.note = r, true, nil
+            log('%s -> %s', a.name, r); save()
+            return
+        end
+    end
+    log('use: no ability named %s', name)
+end
 
 -- my pet's abilities (role Pet), in a fight: a heal under 30% pet HP (Mend Companion), a guard not on it yet once a mob
 -- wears it under 80% (Companion's Aegis, Host in the Shell, Companion's Fortification); they used to sit Off
@@ -2740,9 +2773,12 @@ function doPetWeapons()
             end
             mq.cmdf('/itemnotify pack%d leftmouseup', slot - 22)
             mq.delay(2000, function() return not mq.TLO.Cursor() end)
+            mq.delay(500)   -- clicked before the move settled, Zenban's second pack never unfolded (2026-10-30 16:12)
+            log('unfolding %s in pack%d', cur, slot - 22)
             mq.cmdf('/itemnotify pack%d rightmouseup', slot - 22)
             mq.delay(1500, casting)
             mq.delay(15000, function() return not casting() end)
+            if mq.TLO.Me.Inventory(slot).Name() == cur then log('%s did not unfold', cur) end
             return true
         end
         if (mq.TLO.Cursor.Container() or 0) > 0 then   -- the unfolded pouch
@@ -3422,7 +3458,8 @@ do
     local ok, mod = pcall(dofile, mq.luaDir .. '/autoxp/named.lua')
     if ok and type(mod) == 'function' then
         FIGHT.named = mod({ S = S, R = R, log = log, list = list, alive = alive, hostiles = hostiles, casting = casting,
-            zoneInfo = zoneInfo, DPS = DPS, ignored = FIGHT.ignoredName, ignoreUI = function() FIGHT.ignoreUI() end })
+            zoneInfo = zoneInfo, DPS = DPS, ignored = FIGHT.ignoredName, ignoreUI = function() FIGHT.ignoreUI() end,
+            anchor = FIGHT.anchor })
     else
         log('named.lua failed to load: %s', tostring(mod))
     end
@@ -4722,7 +4759,7 @@ function draw()
             ImGui.PushStyleColor(ImGuiCol.Button, c[1], c[2], c[3], c[4])
             if ImGui.Button('Anchor', 70, 26) then FIGHT.setAnchor(not an) end
             ImGui.PopStyleColor()
-            tip('Anchor: drop the pull circle where I stand. Hunter pulls only mobs within the pull radius of that spot,\nand the map circle stays there instead of following me. Kept for this zone until clicked again.')
+            tip('Anchor: drop the pull circle where I stand. Hunter pulls only mobs, and Named only named and placeholders,\nwithin the pull radius of that spot, and the map circle stays there instead of following me.\nKept for this zone until clicked again.')
         end
         ImGui.Text('Duties:'); ImGui.SameLine()
         toggle('Heal', 'heal', 'Heal: heal yourself / group members below the Healing thresholds,\nand use Emergency abilities (Lay on Hands) below the emergency threshold.')
@@ -5077,6 +5114,7 @@ mq.bind('/autoxp', function(cmd, a1, a2, ...)
     elseif cmd == 'ignoreset' and a1 then FIGHT.setIgnore(table.concat({ a2, ... }, ' '), a1, true)   -- from the group
     elseif cmd == 'backup' then S.backupTank = (a1 == nil and not S.backupTank) or a1 == 'on'; log('backup tank %s', S.backupTank and 'ON' or 'OFF')
     elseif cmd == 'tier' and a1 and a2 then FIGHT.tierCmd(a1, table.concat({ a2, ... }, ' '))
+    elseif cmd == 'use' and a1 and a2 then FIGHT.roleCmd(a1, table.concat({ a2, ... }, ' '))
     elseif cmd == 'set' and a1 and a2 and S[a1] ~= nil and type(S[a1]) ~= 'table' then
         -- /autoxp set <setting> <value>: any plain setting, e.g. groupHealPct 65
         if type(S[a1]) == 'number' then S[a1] = tonumber(a2) or S[a1]
@@ -5086,7 +5124,7 @@ mq.bind('/autoxp', function(cmd, a1, a2, ...)
     elseif duties[cmd] then S[cmd] = (a1 == nil and not S[cmd]) or a1 == 'on'; log('%s %s', cmd, S[cmd] and 'ON' or 'OFF')
     end
 end)
-log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|ignore [name]|unignore <name>|group|hud [on|off]|set <setting> <value>|tier <tier> <ability>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
+log('AutoXP loaded: /autoxp start|stop|pause|resume|show|scan|save|mode <Manual|Hunter|Named|Assist|Chase>|role <tank|dps>|heal|cc|debuff|nuke|dot|buff|rez [on|off]|backup|anchor [on|off]|ignore [name]|unignore <name>|group|hud [on|off]|set <setting> <value>|use <role> <ability>|tier <tier> <ability>|spells|burn|travel <zone|stop>|invis [ivu]|named reload|scrape')
 
 startSpellScan()
 if args[1] then TRIP.go(args[1]) end
