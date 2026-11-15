@@ -123,9 +123,10 @@ local function spawn(id) return id and id > 0 and mq.TLO.Spawn('id ' .. id) or n
 -- dead = corpse; a living mob can read 0% HP (a sliver left), so HP% never means dead
 local function alive(s) return s and s() and s.Type() ~= 'Corpse' end
 -- a borrowed gem is saved too, so a reload in the middle of buffing still puts the spell back
--- low on mana and should sit for it (bards don't: they sing their regen songs instead)
--- low on mana or endurance and should sit for it
+-- low on mana or endurance and should sit for it (a bard doesn't: its rest songs regenerate the group's and its
+-- own, and a sitting bard sings nothing - Pindaini sat for endurance under 55% in every lull)
 local function manaLow()
+    if mq.TLO.Me.Class.ShortName() == 'BRD' then return false end
     if (mq.TLO.Me.MaxMana() or 0) > 0 and (mq.TLO.Me.PctMana() or 100) < S.restPct then return true end
     return (mq.TLO.Me.PctEndurance() or 100) < S.restPct
 end
@@ -1136,7 +1137,7 @@ local function trained(sp)
     return cap == 0 or (mq.TLO.Me.Skill(sk)() or 0) >= cap * 0.75
 end
 
-local FILLVER = 6   -- bump when the gem classification changes, to refill every character's lists once
+local FILLVER = 7   -- bump when the gem classification changes, to refill every character's lists once
 
 -- the base of one effect of a spell (SPA 0 health, 15 mana, 192 hate), 0 without it
 function FIGHT.spa(sp, spa)
@@ -1182,11 +1183,20 @@ local function fillFromGems()
     byLevel(heals); byLevel(stuns); byLevel(hate); byLevel(nukes); byLevel(dots); byLevel(debuffs); byLevel(mez)
     local tank = {}
     for _, l in ipairs({ stuns, hate }) do for _, n in ipairs(l) do table.insert(tank, n) end end
-    -- a list you edited (or set in the settings file) stays as you wrote it: what it lacks is only logged
+    -- a list you edited (or set in the settings file) stays as you wrote it: what it lacks is only logged. A new
+    -- rank of a spell on it takes the old name's place: Me.Gem(name) is an exact match, so after Aria of Tenisbre
+    -- Rk. II went in over Aria of Tenisbre the list's name was never memorized again - the bard sang only Requiem
+    -- and Dirge (the two still at base rank) for weeks, and no rest song at all
     local function set(key, names)
         if not S.userLists[key] then S[key] = table.concat(names, ', '); return end
-        local have, extra = {}, {}
-        for _, n in ipairs(list(S[key])) do have[n] = true end
+        local have, extra, mine, line = {}, {}, list(S[key]), {}
+        for _, n in ipairs(names) do line[FIGHT.rankless(n)] = n end
+        for i, n in ipairs(mine) do
+            local new = line[FIGHT.rankless(n)]
+            if new and new ~= n and not mq.TLO.Me.Gem(n)() then log('%s: %s takes the place of %s', key, new, n); mine[i] = new end
+        end
+        S[key] = table.concat(mine, ', ')
+        for _, n in ipairs(mine) do have[n] = true end
         for _, n in ipairs(names) do if not have[n] then table.insert(extra, n) end end
         if #extra > 0 then log('%s: keeping your list (also memorized: %s)', key, table.concat(extra, ', ')) end
     end
