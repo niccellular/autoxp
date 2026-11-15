@@ -114,7 +114,7 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   invisibility versus undead first when undead are along the way (Group Perfected Invisibility to Undead, cast by
   whoever has it), then the bard's Selo's Sonata and Shauri's Sonorous Clouding (AAs 3704, 231; "Invis with" /
   "IVU with" set others); after three asks it goes anyway. It holds for the same reasons as the Hunter, pulls with the
-  pull spell, fights what comes, and the chase looter hands out the drops.
+  pull spell and fights what comes.
 - **Movement:** 3D distance and line of sight; navigates on the mesh instead of sticking through walls or floors.
   It goes to a mob like `/nav target` (the whole path, re-pathed as the mob moves) and stops itself once the mob is
   in range, in sight and on its floor.
@@ -184,16 +184,6 @@ Settings are saved per character in `<MQ>/config/autoxp_<Name>.lua`; the log goe
   (a group member's, or its own) is dragged over with `/corpse` (a groupmate's needs their consent) - never walked to;
   one that doesn't come (out of range) is looked at again every minute, and let go (`/corpsedrop`) once rezzed. The
   Hunter tank holds its pulls meanwhile.
-- **Chase loot:** out of fights, every 3s, from the Advanced Loot window: each character loots its own personal
-  chase drops and the group leader hands out the shared ones ("Chase loot", on by default): tradeable ones to himself,
-  No Trade ones to a group member of a class that can use them (the classes are listed with the item; the member given
-  fewest of that item so far, skipping one who didn't take it). What counts is in
-  `chaseloot.lua` (name patterns, exact item names, never-loot): Night of Shadows' "Blood-soaked ..." items and
-  Deepshade's named gear, Laurion's Song's "... of Memoryforged Desolation" items, the tradeable named gear of Laurion
-  Inn, Timorous Falls and Ankexfen Keep, the No Trade named gear of the LS tier 2 zones, and LS named power sources;
-  in a zone with a `named/<zone>.lua`, every drop of its named (Named mode's data, any mode). Nothing else is looted; the file is re-read every minute, so edits apply without a reload.
-  It needs the Advanced Looting System on (`/useadvlooting`; `/use ...` is short for it and turns it off): the log
-  says when it goes off.
 - **Pets:** mages hand two summoned weapons to every unarmed pet in the group (noticed while idle too), using a
   folded pack from the bags before casting the grant again; the pouch is destroyed once it's empty. In fights a pet
   under 80% HP gets its guards (role Pet: Companion's Aegis, Host in the Shell, Companion's Fortification) and one under

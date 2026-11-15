@@ -1,6 +1,6 @@
 -- Named mode (FIGHT.named in init.lua): hunt only a zone's named mobs and their placeholders.
--- Data: named/<zone>.lua - the named, their placeholders, the map points posted in the page comments and the named
--- drops, written by tools/named_scrape.py from eqresource.com; a zone without one is read in the background (pythonw)
+-- Data: named/<zone>.lua - the named, their placeholders and the map points posted in the page comments, written by
+-- tools/named_scrape.py from eqresource.com; a zone without one is read in the background (pythonw)
 -- the first time it is hunted. Targets: the live spawns named like a named or a placeholder - the client sees the whole
 -- zone. A placeholder of a named with posted map points counts only within 100 of one (the same name elsewhere is
 -- trash), and one under 100% HP that isn't on my extended target list is someone else's. A named up goes first (the
@@ -14,7 +14,7 @@ local ImGui = require('ImGui')
 return function(X)
 local S, R, log = X.S, X.R, X.log
 local DIR = mq.luaDir .. '/autoxp/named'
-local N = { loot = {}, targets = {}, kills = {}, status = '' }
+local N = { targets = {}, kills = {}, status = '' }
 local D, names, spotsOf = nil, {}, {}   -- the zone's data; lowercased spawn name -> { kind, named = {...} }; named -> map points
 local words = {}                        -- the spawn-search words for those names
 local seen, engaged = {}, {}            -- named spawns announced; spawn id -> the target I went for (kills)
@@ -37,7 +37,6 @@ end
 
 local function here() return mq.TLO.Zone.ShortName() or '' end
 local function readFile(p) local f = io.open(p, 'r'); if not f then return nil end; local s = f:read('*a'); f:close(); return s end
-local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 local function phCount() local n = 0; for _, e in pairs(names) do if e.kind == 'ph' then n = n + 1 end end; return n end
 local function tip(text) if text and ImGui.IsItemHovered() then ImGui.SetTooltip('%s', text) end end
 
@@ -70,8 +69,7 @@ local function load(z)
     end
     words = {}
     for k in pairs(names) do words[searchWord(k)] = true end
-    N.loot = t.loot or {}
-    log('named: %s - %d named, %d placeholders, %d map points, %d drops', t.name or z, #(t.named or {}), phCount(), #(t.spots or {}), count(N.loot))
+    log('named: %s - %d named, %d placeholders, %d map points', t.name or z, #(t.named or {}), phCount(), #(t.spots or {}))
     return true
 end
 
@@ -81,7 +79,7 @@ function N.ready(scrape)
     local z = here()
     if z == '' then return false end
     if N.zone ~= z then
-        N.zone, D, names, spotsOf, N.loot, N.targets, N.goal, seen, engaged = z, nil, {}, {}, {}, {}, nil, {}, {}
+        N.zone, D, names, spotsOf, N.targets, N.goal, seen, engaged = z, nil, {}, {}, {}, nil, {}, {}
         load(z)
     end
     if D then return true end
@@ -116,12 +114,6 @@ function N.rescrape()
     os.remove(DIR .. '/' .. z .. '.lua')
     N.zone, N.failed, N.run, D = nil, nil, nil, nil
     N.ready(true)
-end
-
--- a named drop of this zone: true (tradeable) or the classes that can use the No Trade item; nil when it isn't one
-function N.lootFor(item)
-    if N.zone ~= here() then N.ready(false) end
-    return N.loot[item]
 end
 
 -- a placeholder counts within 100 of a posted map point of one of its named (none posted for them: anywhere)
@@ -358,8 +350,8 @@ function N.draw()
     local z = here()
     ImGui.PushTextWrapPos(0)
     if D then
-        ImGui.TextColored(0.4, 0.8, 1, 1, string.format('%s: %d named, %d placeholders, %d map points, %d drops', D.name or z, #(D.named or {}),
-            phCount(), #(D.spots or {}), count(N.loot)))
+        ImGui.TextColored(0.4, 0.8, 1, 1, string.format('%s: %d named, %d placeholders, %d map points', D.name or z, #(D.named or {}),
+            phCount(), #(D.spots or {})))
         tip(D.url)
     elseif N.run and N.run.zone == z then
         ImGui.TextColored(1, 0.8, 0.3, 1, 'reading eqresource.com in the background...')
@@ -368,7 +360,7 @@ function N.draw()
     end
     ImGui.PopTextWrapPos()
     if ImGui.SmallButton('Read eqresource.com again') then N.rescrape() end
-    tip('Read this zone\'s named, placeholders, posted map points and drops from eqresource.com again (in the background).')
+    tip('Read this zone\'s named, placeholders and posted map points from eqresource.com again (in the background).')
     S.namedInvis = ImGui.Checkbox('Invisible walks', S.namedInvis)
     tip('Before a walk that passes other NPCs, the group goes invisible (/autoxp invis to every member):\ninvisibility versus undead first when undead are along the way, then invisibility.\nAfter three asks (36s) it goes anyway.')
     ImGui.SetNextItemWidth(160)

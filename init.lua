@@ -35,7 +35,7 @@ local S = {
     nukes = '', nukeManaMin = 30, dotManaMin = 40, stuns = '', buffs = '', useTaunt = true, prioritize = true, showRadius = true,
     combatBuffs = 'Yaulp', stunCooldown = true, keepInFront = true,
     avoidMobs = true, avoidRadius = 100, pullVer = 0, pullMethod = 'Auto', pullSpell = '', pullDist = 100, autoMem = true, gemSig = '', memBuffs = true,
-    style = 'Auto', castRange = 100, mez = '', dots = '', twincastNukes = '', itNukes = '', debuffs = '', petSpell = '', usePet = true, shrinkPet = true, chaseLoot = true, class = '',
+    style = 'Auto', castRange = 100, mez = '', dots = '', twincastNukes = '', itNukes = '', debuffs = '', petSpell = '', usePet = true, shrinkPet = true, class = '',
     songs = '', restSongs = '', songManaMin = 10, fillVer = 0, swapGem = false,
     tankBuffs = '', manaSpells = '', manaPct = 50, userLists = {}, rezDone = {},
     defPct = 50, panicPct = 30, endPct = 30, burnNamed = true, burnLevel = true, burnAdds = true, burnCount = 5,
@@ -2503,101 +2503,6 @@ local function doBuffs()
     return restoreGem()
 end
 
--- chase loot (chaseloot.lua: Night of Shadows' and Laurion's Song's chase lines and named gear; named/<zone>.lua: the zone's
--- named drops, Named mode's data): rare drops worth keeping. Out of a fight, every 3s, from the Advanced Loot
--- window: my own personal chase drops are looted (a No Trade one only by a class that can use it), and the group leader
--- hands out the shared ones: a tradeable one to himself, a No Trade one (its classes in chaseloot.lua) to a group member
--- of a class that can use it - the one given fewest of it so far, skipping one who didn't take it (lore: has one).
--- Nothing else is touched. An item is tried once a minute (a lore one I already carry would otherwise be retried in a loop)
-do
-local CHASE, chaseAt, tried, given, lastTo, refused, noOne = nil, 0, {}, {}, {}, {}, {}
-local function isChase(name)
-    -- read again every minute: edits to chaseloot.lua apply without a reload (a broken edit keeps the last good list)
-    if not CHASE or mq.gettime() - chaseAt > 60000 then
-        chaseAt = mq.gettime()
-        local ok, t = pcall(dofile, mq.luaDir .. '/autoxp/chaseloot.lua')
-        if ok and type(t) == 'table' then CHASE = t
-        else
-            log('chase loot list failed to load: %s', tostring(t))
-            CHASE = CHASE or { patterns = {}, named = {}, never = {} }
-        end
-    end
-    local l = name:lower()
-    if CHASE.never[l] then return false end
-    local zl = FIGHT.named and FIGHT.named.lootFor(l)   -- this zone's named drops
-    if zl ~= nil then return zl end
-    if CHASE.named[l] then return CHASE.named[l] end
-    for _, p in ipairs(CHASE.patterns) do if l:find(p) then return true end end
-    return false
-end
--- a No Trade item's classes ('ALL' or e.g. 'BER MNK WAR'): can this class use it
-local function usable(classes, cls) return classes == 'ALL' or (' ' .. classes .. ' '):find(' ' .. cls .. ' ', 1, true) ~= nil end
--- who gets a shared No Trade item: a group member here of a class that can use it, given fewest of it, not one who
--- didn't take it before
-local function recipient(item, classes)
-    local best, bc
-    for i = 0, (mq.TLO.Group.Members() or 0) do
-        local m = i > 0 and mq.TLO.Group.Member(i) or nil
-        local n = m and m.Name() or ME
-        local cls = m and m.Class.ShortName() or mq.TLO.Me.Class.ShortName() or ''
-        local here = not m or (m.Present() and not m.OtherZone() and m.Type() ~= 'Corpse')
-        if n and here and usable(classes, cls) and not refused[item .. '|' .. n] then
-            local c = given[item .. '|' .. n] or 0
-            if not best or c < bc then best, bc = n, c end
-        end
-    end
-    return best
-end
-function FIGHT.chaseLoot()
-    if not S.chaseLoot or mq.gettime() - (R.lootAt or 0) < 3000 or casting() or #hostiles() > 0 then return false end
-    R.lootAt = mq.gettime()
-    local al, now = mq.TLO.AdvLoot, mq.gettime()
-    if al.LootInProgress() then return false end
-    for i = 1, (al.PCount() or 0) do
-        local n = al.PList(i).Name()
-        local want = n and now - (tried['p' .. n] or 0) > 60000 and isChase(n)
-        if want and (want == true or usable(want, mq.TLO.Me.Class.ShortName() or '')) then
-            tried['p' .. n] = now
-            mq.cmdf('/advloot personal %d loot', i)
-            log('chase loot: %s', n)
-            return true
-        end
-    end
-    if mq.TLO.Group.Leader.Name() ~= ME then return false end   -- the leader hands out the shared loot
-    -- a No Trade item gone from the list was taken; one still listed a minute after it was given wasn't
-    local listed = {}
-    for i = 1, (al.SCount() or 0) do listed[al.SList(i).Name() or ''] = true end
-    for n in pairs(lastTo) do if not listed[n] then lastTo[n] = nil end end
-    for i = 1, (al.SCount() or 0) do
-        local n = al.SList(i).Name()
-        local want = n and now - (tried['s' .. n] or 0) > 60000 and isChase(n)
-        if want then
-            tried['s' .. n] = now
-            local to = ME
-            if want ~= true then
-                if lastTo[n] then refused[n .. '|' .. lastTo[n]] = true; log('chase loot: %s - %s did not take it', n, lastTo[n]) end
-                to = recipient(n, want)
-                lastTo[n] = to
-                if not to and not noOne[n] then noOne[n] = true; log('chase loot: %s (No Trade, %s) - nobody here to give it to', n, want) end
-            end
-            if to then
-                given[n .. '|' .. to] = (given[n .. '|' .. to] or 0) + 1
-                mq.cmdf('/advloot shared %d giveto %s', i, to)
-                log('chase loot: %s (shared, to %s)', n, to == ME and 'me' or to)
-                return true
-            end
-        end
-    end
-    return false
-end
-end
-
--- advanced looting turned off (all six at 17:42 from "/use item amulet": /use is short for /useadvlooting) leaves the
--- Advanced Loot window empty, and chase loot with it
-mq.event('axpAdvLootOff', 'You are no longer using the Advanced Looting System.', function()
-    if S.chaseLoot then log('advanced looting is off - chase loot needs it: /useadvlooting turns it back on') end
-end)
-
 -- pet classes: summon the best pet in the book (mages: water first) and keep the best pet buff of each line
 -- on it (haste, misc, block: 10 min+). A gem is borrowed for any that isn't memorized
 local petBook, doPetCare
@@ -3985,7 +3890,6 @@ local function step()
             if memRestSongs() then return end
             if memHeals() then return end
         end
-        if FIGHT.chaseLoot() then return end
         if doPetCare() then return end
         if doPetWeapons() then return end
         if doRez() then return end
@@ -3998,7 +3902,6 @@ local function step()
         if #hostiles() > 0 then mq.cmd('/stand'); setState('FIND'); return end
         if doRez() then return end
         if FIGHT.lobbySummon() then return end
-        if FIGHT.chaseLoot() then return end
         if S.mode == 'Chase' then
             local lead = leadSpawn()
             if lead and (lead.Distance() or 0) > S.chaseDist then mq.cmd('/stand'); setState('FIND'); return end
@@ -4889,8 +4792,6 @@ function draw()
                 S.petSpell = ImGui.InputText('Pet summon', S.petSpell)
                 S.usePet = ImGui.Checkbox('Use pet', S.usePet)
                 ImGui.SameLine(); S.shrinkPet = ImGui.Checkbox('Shrink pet', S.shrinkPet)
-                S.chaseLoot = ImGui.Checkbox('Chase loot', S.chaseLoot)
-                tip('Out of fights: loot my own chase drops (chaseloot.lua) from Advanced Loot; the group leader also gives the shared ones to himself.')
                 tip('Shrink each new pet (Diminutive Companion, Shrink) down to the smallest it goes, out of fights.')
                 S.nukeManaMin = ImGui.SliderInt('Nuke above mana %', S.nukeManaMin, 0, 100)
                 tip('Under it only lifetaps are cast (they heal). Under Gift of Mana (the next spell is free) any mana will do.')
